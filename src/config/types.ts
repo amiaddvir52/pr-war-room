@@ -7,5 +7,6 @@ export type {
   ModelsConfig,
   VerificationConfig,
   ReviewConfig,
+  ContextConfig,
   CiConfig,
 } from "./schema.js";

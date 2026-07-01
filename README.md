@@ -13,12 +13,14 @@ patches.
 
 ## Status
 
-This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–3** are
+This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–4** are
 implemented: the CLI skeleton, configuration system, PR-URL parsing, the
 `.ai-review/` artifact layout, **GitHub PR ingestion** (metadata, changed files,
-and diff), and the **local workspace** — a shallow checkout of the PR head, with
+and diff), the **local workspace** (a shallow checkout of the PR head with
 project-type / package-manager / verification-command detection and optional
-verification runs. The AI review agents arrive in later phases.
+verification runs), and the **review packet** — a structured `review_packet.json`
++ `review_packet.md` combining PR intent, diffs, nearby code context, detected
+repo conventions, and verification results. The AI review agents arrive next.
 
 GitHub access uses `GITHUB_TOKEN` if set, otherwise `GH_TOKEN`, otherwise the
 `gh` CLI (`gh auth token`). If none is available the tool prints a setup
@@ -53,7 +55,8 @@ Every run writes artifacts under `.ai-review/` in the current directory:
 `run_metadata.json`; `github/pr_metadata.json`, `github/changed_files.json`, and
 `github/diff.patch` from the ingested PR; `workspace/repo/` (a shallow checkout of
 the PR head), `workspace/workspace_metadata.json`, and
-`verification/initial_verification.json`.
+`verification/initial_verification.json`; and the review packet at
+`context/review_packet.json` + `context/review_packet.md`.
 
 Verification is **opt-in**: detection always runs, but commands only execute with
 `--verify` (or `verification.enabled: true`). This matters because running a PR's
@@ -83,9 +86,20 @@ the current directory, in which case it is deep-merged over the defaults
   "review": {
     "maxFindings": 20,
     "includeNiceToHave": false
+  },
+  "context": {
+    "maxPacketBytes": 524288,
+    "nearbyContextLines": 20,
+    "maxNearbyLinesPerFile": 400
   }
 }
 ```
+
+`context.maxPacketBytes` soft-caps the review packet (largest patches are trimmed
+with a warning if exceeded); `context.nearbyContextLines` sets how much
+surrounding code is included around each changed hunk;
+`context.maxNearbyLinesPerFile` caps the total nearby-context lines per file
+across all its hunks.
 
 `verification.commands` is empty by default so detection picks the commands; set
 it to override detection. `enabled` (or the `--verify` flag) turns execution on;

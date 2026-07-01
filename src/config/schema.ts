@@ -34,6 +34,17 @@ export const ReviewConfigSchema = z.object({
   includeNiceToHave: z.boolean(),
 });
 
+export const ContextConfigSchema = z.object({
+  // Soft cap on the serialized review packet. When exceeded, the largest file
+  // patches are trimmed (Phase 4) and a warning is emitted.
+  maxPacketBytes: z.number().int().positive().default(524_288),
+  // Lines of surrounding code to include around each changed hunk.
+  nearbyContextLines: z.number().int().nonnegative().default(20),
+  // Total cap on nearby-context lines emitted per changed file (across all
+  // hunks), independent of the per-hunk `nearbyContextLines` window.
+  maxNearbyLinesPerFile: z.number().int().positive().default(400),
+});
+
 /**
  * CI options are pre-declared (optional/inert) so a config can already set them
  * and Phase 15 can activate them without breaking existing configs.
@@ -50,6 +61,7 @@ export const ConfigSchema = z
     models: ModelsConfigSchema,
     verification: VerificationConfigSchema,
     review: ReviewConfigSchema,
+    context: ContextConfigSchema.default({}),
     ci: CiConfigSchema.optional(),
   })
   // Reject unknown top-level keys so typos in a user config fail loudly.
@@ -58,5 +70,6 @@ export const ConfigSchema = z
 export type ModelsConfig = z.infer<typeof ModelsConfigSchema>;
 export type VerificationConfig = z.infer<typeof VerificationConfigSchema>;
 export type ReviewConfig = z.infer<typeof ReviewConfigSchema>;
+export type ContextConfig = z.infer<typeof ContextConfigSchema>;
 export type CiConfig = z.infer<typeof CiConfigSchema>;
 export type Config = z.infer<typeof ConfigSchema>;

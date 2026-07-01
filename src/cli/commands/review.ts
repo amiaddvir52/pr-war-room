@@ -9,9 +9,19 @@ import { selectBanner } from "../../ui/banner.js";
 import { ingestPullRequest, type IngestPullRequest } from "../../github/ingestPullRequest.js";
 import { prepareWorkspace } from "../../workspace/prepareWorkspace.js";
 import type { PrepareWorkspaceInput, WorkspaceResult } from "../../workspace/prepareWorkspace.js";
+import { buildReviewPacket } from "../../context/buildReviewPacket.js";
+import type {
+  BuildReviewPacketInput,
+  BuildReviewPacketResult,
+} from "../../context/buildReviewPacket.js";
 
 /** Phase-3 workspace prep. Injected so tests avoid git/subprocess side effects. */
 export type PrepareWorkspaceFn = (input: PrepareWorkspaceInput) => Promise<WorkspaceResult>;
+
+/** Phase-4 review-packet builder. Injected so tests avoid filesystem coupling. */
+export type BuildReviewPacketFn = (
+  input: BuildReviewPacketInput,
+) => Promise<BuildReviewPacketResult>;
 
 export interface ReviewOptions {
   version: string;
@@ -25,6 +35,8 @@ export interface ReviewOptions {
   verify?: boolean;
   /** Workspace preparation. Defaults to the real one; inject a fake in tests. */
   prepareWorkspace?: PrepareWorkspaceFn;
+  /** Review-packet builder. Defaults to the real one; inject a fake in tests. */
+  buildReviewPacket?: BuildReviewPacketFn;
 }
 
 /**
@@ -39,6 +51,7 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   const reporter = options.reporter ?? new Reporter();
   const ingest = options.ingest ?? ingestPullRequest;
   const prepareWs = options.prepareWorkspace ?? prepareWorkspace;
+  const buildPacket = options.buildReviewPacket ?? buildReviewPacket;
 
   const pr = parsePrUrl(prUrl);
   const { config, source, path } = await loadConfig(cwd);
@@ -106,6 +119,23 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
     reporter.note("Verification skipped — pass --verify to run install + test/lint/build.");
   }
 
+  // Phase 4 — assemble the structured review packet from everything gathered.
+  const { packet } = await buildPacket({
+    pr,
+    prMetadata: result.metadata,
+    changedFiles: result.changedFiles,
+    workspace,
+    config,
+    paths,
+    cwd,
+  });
+  reporter.step(`built review packet (${packet.changedFiles.length} files)`);
+  if (packet.limits.truncated) {
+    reporter.warn(
+      `Review packet trimmed to fit ${packet.limits.maxPacketBytes} bytes — see ${relative(paths.root, paths.context.packetJson)}`,
+    );
+  }
+
   reporter.blank();
-  reporter.note("Phase 3 — review packet and AI agents are not wired up yet.");
+  reporter.note("Phase 4 — AI review agents are not wired up yet.");
 }

@@ -78,11 +78,23 @@ export {
   PACKAGE_MANAGERS,
 } from "./context/detectProjectType.js";
 export { detectVerificationCommands } from "./context/detectVerificationCommands.js";
+
+// Phase 4 — review packet builder
+export { buildReviewPacket, renderReviewPacketMarkdown } from "./context/buildReviewPacket.js";
+export { collectNearbyContext } from "./context/collectNearbyContext.js";
+export { collectRepoConventions } from "./context/collectRepoConventions.js";
 export type {
   ProjectType,
   PackageManager,
   DetectedCommands,
   DetectVerificationInput,
+  ReviewPacket,
+  PacketChangedFile,
+  PacketVerification,
+  PacketVerificationCommand,
+  RepoConventions,
+  BuildReviewPacketInput,
+  BuildReviewPacketResult,
 } from "./context/types.js";
 
 export { Reporter, silentReporter } from "./ui/reporter.js";

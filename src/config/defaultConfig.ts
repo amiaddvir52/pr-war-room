@@ -23,4 +23,9 @@ export const defaultConfig: Config = {
     maxFindings: 20,
     includeNiceToHave: false,
   },
+  context: {
+    maxPacketBytes: 524_288,
+    nearbyContextLines: 20,
+    maxNearbyLinesPerFile: 400,
+  },
 };

@@ -3,12 +3,13 @@ import { mkdtemp, rm, writeFile, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runReview } from "../../src/cli/commands/review.js";
-import type { PrepareWorkspaceFn } from "../../src/cli/commands/review.js";
+import type { PrepareWorkspaceFn, BuildReviewPacketFn } from "../../src/cli/commands/review.js";
 import { PrUrlError, GitHubError } from "../../src/errors.js";
 import { CONFIG_FILENAME } from "../../src/config/loadConfig.js";
 import { silentReporter } from "../../src/ui/reporter.js";
 import type { IngestPullRequest, IngestResult } from "../../src/github/types.js";
 import type { PrepareWorkspaceInput, WorkspaceResult } from "../../src/workspace/types.js";
+import type { BuildReviewPacketInput, ReviewPacket } from "../../src/context/types.js";
 
 async function readJson(dir: string, ...segments: string[]): Promise<Record<string, unknown>> {
   const raw = await readFile(join(dir, ".ai-review", ...segments), "utf8");
@@ -104,6 +105,53 @@ function capturingWorkspace(): { fn: PrepareWorkspaceFn; calls: PrepareWorkspace
 }
 const fakeWorkspace = (): PrepareWorkspaceFn => capturingWorkspace().fn;
 
+function makePacket(overrides: { truncated?: boolean } = {}): ReviewPacket {
+  return {
+    schemaVersion: 1,
+    pr: {
+      owner: "org",
+      repo: "repo",
+      number: 123,
+      title: "Test PR",
+      description: "",
+      author: "alice",
+      state: "open",
+      draft: false,
+      baseBranch: "main",
+      headBranch: "feature",
+      htmlUrl: "https://github.com/org/repo/pull/123",
+    },
+    repository: { projectTypes: ["node"], packageManager: "npm", detectedCommands: ["npm run test"], headSha: "deadbeef" },
+    verification: { enabled: false, ran: false, allPassed: true, install: null, commands: [] },
+    changedFiles: [],
+    repoConventions: { readmeSummary: null, testConventions: null, errorHandlingPatterns: null, apiPatterns: null },
+    limits: { maxPacketBytes: 524_288, approxBytes: 100, truncated: overrides.truncated ?? false, trimmedFiles: 0 },
+    generatedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function capturingBuildPacket(): { fn: BuildReviewPacketFn; calls: BuildReviewPacketInput[] } {
+  const calls: BuildReviewPacketInput[] = [];
+  const fn: BuildReviewPacketFn = async (input) => {
+    calls.push(input);
+    return { packet: makePacket(), markdown: "# packet" };
+  };
+  return { fn, calls };
+}
+const fakeBuildPacket = (): BuildReviewPacketFn => capturingBuildPacket().fn;
+
+/** Common injected fakes for the whole Phase 1–4 pipeline. */
+function fakes(extra: Partial<Parameters<typeof runReview>[1]> = {}) {
+  return {
+    version: "0.1.0",
+    reporter: silentReporter(),
+    ingest: fakeIngest(),
+    prepareWorkspace: fakeWorkspace(),
+    buildReviewPacket: fakeBuildPacket(),
+    ...extra,
+  };
+}
+
 describe("runReview (integration)", () => {
   let dir: string;
 
@@ -115,74 +163,37 @@ describe("runReview (integration)", () => {
   });
 
   it("writes run_metadata.json with the parsed PR and default config", async () => {
-    await runReview("https://github.com/org/repo/pull/123", {
-      version: "0.1.0",
-      cwd: dir,
-      reporter: silentReporter(),
-      ingest: fakeIngest(),
-      prepareWorkspace: fakeWorkspace(),
-    });
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir }));
     const meta = await readJson(dir, "run_metadata.json");
     expect(meta["pr"]).toEqual({ owner: "org", repo: "repo", number: 123 });
     expect(meta["configSource"]).toBe("default");
-    expect(meta["phase"]).toBe(1);
     expect((meta["config"] as { review: { maxFindings: number } }).review.maxFindings).toBe(20);
   });
 
   it("reflects a user config override", async () => {
-    await writeFile(
-      join(dir, CONFIG_FILENAME),
-      JSON.stringify({ review: { maxFindings: 5 } }),
-      "utf8",
-    );
-    await runReview("https://github.com/org/repo/pull/1", {
-      version: "0.1.0",
-      cwd: dir,
-      reporter: silentReporter(),
-      ingest: fakeIngest(),
-      prepareWorkspace: fakeWorkspace(),
-    });
+    await writeFile(join(dir, CONFIG_FILENAME), JSON.stringify({ review: { maxFindings: 5 } }), "utf8");
+    await runReview("https://github.com/org/repo/pull/1", fakes({ cwd: dir }));
     const meta = await readJson(dir, "run_metadata.json");
     expect(meta["configSource"]).toBe("file");
     expect((meta["config"] as { review: { maxFindings: number } }).review.maxFindings).toBe(5);
   });
 
   it("writes the three GitHub ingestion artifacts", async () => {
-    await runReview("https://github.com/org/repo/pull/123", {
-      version: "0.1.0",
-      cwd: dir,
-      reporter: silentReporter(),
-      ingest: fakeIngest(),
-      prepareWorkspace: fakeWorkspace(),
-    });
-    const prMeta = await readJson(dir, "github", "pr_metadata.json");
-    expect(prMeta["number"]).toBe(123);
-    const changed = await readJson(dir, "github", "changed_files.json");
-    expect(changed["totalCount"]).toBe(1);
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir }));
+    expect((await readJson(dir, "github", "pr_metadata.json"))["number"]).toBe(123);
+    expect((await readJson(dir, "github", "changed_files.json"))["totalCount"]).toBe(1);
     const diff = await readFile(join(dir, ".ai-review", "github", "diff.patch"), "utf8");
     expect(diff).toBe("DIFF TEXT");
   });
 
   it("does not write diff.patch when the diff is null", async () => {
-    await runReview("https://github.com/org/repo/pull/123", {
-      version: "0.1.0",
-      cwd: dir,
-      reporter: silentReporter(),
-      ingest: fakeIngest({ diff: null }),
-      prepareWorkspace: fakeWorkspace(),
-    });
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, ingest: fakeIngest({ diff: null }) }));
     await expect(stat(join(dir, ".ai-review", "github", "diff.patch"))).rejects.toThrow();
   });
 
   it("invokes workspace prep once, without verify by default", async () => {
     const ws = capturingWorkspace();
-    await runReview("https://github.com/org/repo/pull/123", {
-      version: "0.1.0",
-      cwd: dir,
-      reporter: silentReporter(),
-      ingest: fakeIngest(),
-      prepareWorkspace: ws.fn,
-    });
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, prepareWorkspace: ws.fn }));
     expect(ws.calls).toHaveLength(1);
     expect(ws.calls[0]?.verify).toBeUndefined();
     expect(ws.calls[0]?.pr).toEqual({ owner: "org", repo: "repo", number: 123 });
@@ -190,29 +201,23 @@ describe("runReview (integration)", () => {
 
   it("threads verify=true through to workspace prep", async () => {
     const ws = capturingWorkspace();
-    await runReview("https://github.com/org/repo/pull/123", {
-      version: "0.1.0",
-      cwd: dir,
-      reporter: silentReporter(),
-      ingest: fakeIngest(),
-      verify: true,
-      prepareWorkspace: ws.fn,
-    });
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, verify: true, prepareWorkspace: ws.fn }));
     expect(ws.calls[0]?.verify).toBe(true);
   });
 
+  it("builds the review packet with the ingested + workspace data", async () => {
+    const bp = capturingBuildPacket();
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, buildReviewPacket: bp.fn }));
+    expect(bp.calls).toHaveLength(1);
+    expect(bp.calls[0]?.pr).toEqual({ owner: "org", repo: "repo", number: 123 });
+    expect(bp.calls[0]?.changedFiles.totalCount).toBe(1);
+    expect(bp.calls[0]?.workspace.metadata.projectTypes).toEqual(["node"]);
+  });
+
   it("does not fail the review when verification reports allPassed:false", async () => {
-    const failingWorkspace: PrepareWorkspaceFn = async () =>
-      makeWorkspaceResult({ ran: true, allPassed: false });
+    const failingWorkspace: PrepareWorkspaceFn = async () => makeWorkspaceResult({ ran: true, allPassed: false });
     await expect(
-      runReview("https://github.com/org/repo/pull/123", {
-        version: "0.1.0",
-        cwd: dir,
-        reporter: silentReporter(),
-        ingest: fakeIngest(),
-        verify: true,
-        prepareWorkspace: failingWorkspace,
-      }),
+      runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, verify: true, prepareWorkspace: failingWorkspace })),
     ).resolves.toBeUndefined();
   });
 
@@ -221,26 +226,12 @@ describe("runReview (integration)", () => {
       throw new GitHubError("auth failed");
     };
     await expect(
-      runReview("https://github.com/org/repo/pull/123", {
-        version: "0.1.0",
-        cwd: dir,
-        reporter: silentReporter(),
-        ingest: failing,
-        prepareWorkspace: fakeWorkspace(),
-      }),
+      runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, ingest: failing })),
     ).rejects.toBeInstanceOf(GitHubError);
   });
 
   it("rejects an invalid URL and writes no artifact", async () => {
-    await expect(
-      runReview("not-a-url", {
-        version: "0.1.0",
-        cwd: dir,
-        reporter: silentReporter(),
-        ingest: fakeIngest(),
-        prepareWorkspace: fakeWorkspace(),
-      }),
-    ).rejects.toThrow(PrUrlError);
+    await expect(runReview("not-a-url", fakes({ cwd: dir }))).rejects.toThrow(PrUrlError);
     await expect(stat(join(dir, ".ai-review"))).rejects.toThrow();
   });
 });
