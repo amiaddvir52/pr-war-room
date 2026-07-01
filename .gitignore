@@ -1,0 +1,8 @@
+node_modules/
+.pnpm-store/
+dist/
+.ai-review/
+coverage/
+*.log
+.DS_Store
+.pr-war-room.local.json
