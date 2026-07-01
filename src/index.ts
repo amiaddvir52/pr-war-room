@@ -30,4 +30,8 @@ export type { RunMetadata, CommandName } from "./runMetadata.js";
 export { runReview } from "./cli/commands/review.js";
 export type { ReviewOptions } from "./cli/commands/review.js";
 
+export { Reporter, silentReporter } from "./ui/reporter.js";
+export type { ReporterOptions } from "./ui/reporter.js";
+export { selectBanner } from "./ui/banner.js";
+
 export { CliError, PrUrlError, ConfigError } from "./errors.js";

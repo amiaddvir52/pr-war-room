@@ -5,8 +5,7 @@ import { join } from "node:path";
 import { runReview } from "../../src/cli/commands/review.js";
 import { PrUrlError } from "../../src/errors.js";
 import { CONFIG_FILENAME } from "../../src/config/loadConfig.js";
-
-const silent = (): void => {};
+import { silentReporter } from "../../src/ui/reporter.js";
 
 async function readMetadata(dir: string): Promise<Record<string, unknown>> {
   const raw = await readFile(join(dir, ".ai-review", "run_metadata.json"), "utf8");
@@ -27,7 +26,7 @@ describe("runReview (integration)", () => {
     await runReview("https://github.com/org/repo/pull/123", {
       version: "0.1.0",
       cwd: dir,
-      log: silent,
+      reporter: silentReporter(),
     });
     const meta = await readMetadata(dir);
     expect(meta["pr"]).toEqual({ owner: "org", repo: "repo", number: 123 });
@@ -45,7 +44,7 @@ describe("runReview (integration)", () => {
     await runReview("https://github.com/org/repo/pull/1", {
       version: "0.1.0",
       cwd: dir,
-      log: silent,
+      reporter: silentReporter(),
     });
     const meta = await readMetadata(dir);
     expect(meta["configSource"]).toBe("file");
@@ -54,7 +53,7 @@ describe("runReview (integration)", () => {
 
   it("rejects an invalid URL and writes no artifact", async () => {
     await expect(
-      runReview("not-a-url", { version: "0.1.0", cwd: dir, log: silent }),
+      runReview("not-a-url", { version: "0.1.0", cwd: dir, reporter: silentReporter() }),
     ).rejects.toThrow(PrUrlError);
     await expect(stat(join(dir, ".ai-review"))).rejects.toThrow();
   });

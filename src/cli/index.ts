@@ -3,24 +3,37 @@ import { Command } from "commander";
 import { runReview } from "./commands/review.js";
 import { runFix } from "./commands/fix.js";
 import { runEval } from "./commands/eval.js";
+import { Reporter, type ReporterOptions } from "../ui/reporter.js";
 import { CliError } from "../errors.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../../package.json") as { version: string };
+
+function reporterOptionsFrom(opts: { quiet?: boolean; color?: boolean }): ReporterOptions {
+  const options: ReporterOptions = { quiet: opts.quiet === true };
+  // commander sets `color` to false only when --no-color is passed; otherwise
+  // leave it unset so the Reporter auto-detects (TTY + NO_COLOR).
+  if (opts.color === false) options.color = false;
+  return options;
+}
 
 export function buildProgram(version: string): Command {
   const program = new Command();
   program
     .name("pr-war-room")
     .description("Multi-agent AI pre-review orchestrator for GitHub PRs")
-    .version(version);
+    .version(version)
+    .option("-q, --quiet", "suppress non-error output")
+    .option("--no-color", "disable colored output");
+
+  const reporterFor = (): Reporter => new Reporter(reporterOptionsFrom(program.opts()));
 
   program
     .command("review")
     .argument("<pr-url>", "GitHub pull request URL")
     .description("Run the AI pre-review flow on a pull request")
     .action(async (prUrl: string) => {
-      await runReview(prUrl, { version });
+      await runReview(prUrl, { version, reporter: reporterFor() });
     });
 
   program
@@ -28,7 +41,7 @@ export function buildProgram(version: string): Command {
     .argument("<pr-url>", "GitHub pull request URL")
     .description("Generate local fix patches for findings (not yet implemented)")
     .action(async (prUrl: string) => {
-      await runFix(prUrl);
+      await runFix(prUrl, { reporter: reporterFor() });
     });
 
   program
@@ -41,7 +54,7 @@ export function buildProgram(version: string): Command {
       Number.parseInt(value, 10),
     )
     .action(async (options: { repo: string; prs: number }) => {
-      await runEval({ repo: options.repo, prs: options.prs });
+      await runEval({ repo: options.repo, prs: options.prs, reporter: reporterFor() });
     });
 
   return program;
@@ -52,11 +65,12 @@ async function main(): Promise<void> {
   try {
     await program.parseAsync(process.argv);
   } catch (error) {
+    const reporter = new Reporter(reporterOptionsFrom(program.opts()));
     if (error instanceof CliError) {
-      console.error(`Error: ${error.message}`);
+      reporter.error(error.message);
       process.exit(error.exitCode);
     }
-    console.error(`Unexpected error: ${(error as Error).message}`);
+    reporter.error(`Unexpected error: ${(error as Error).message}`);
     process.exit(1);
   }
 }
