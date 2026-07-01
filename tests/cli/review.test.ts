@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runReview } from "../../src/cli/commands/review.js";
 import type { PrepareWorkspaceFn, BuildReviewPacketFn } from "../../src/cli/commands/review.js";
-import { PrUrlError, GitHubError } from "../../src/errors.js";
+import type { RunReviewer, RunReviewerInput } from "../../src/agents/runReviewer.js";
+import { PrUrlError, GitHubError, ReviewerError } from "../../src/errors.js";
 import { CONFIG_FILENAME } from "../../src/config/loadConfig.js";
 import { silentReporter } from "../../src/ui/reporter.js";
 import type { IngestPullRequest, IngestResult } from "../../src/github/types.js";
@@ -140,7 +141,17 @@ function capturingBuildPacket(): { fn: BuildReviewPacketFn; calls: BuildReviewPa
 }
 const fakeBuildPacket = (): BuildReviewPacketFn => capturingBuildPacket().fn;
 
-/** Common injected fakes for the whole Phase 1–4 pipeline. */
+function capturingReviewer(): { fn: RunReviewer; calls: RunReviewerInput[] } {
+  const calls: RunReviewerInput[] = [];
+  const fn: RunReviewer = async (input) => {
+    calls.push(input);
+    return { agent: "fake", findings: [], droppedCount: 0, parseError: null };
+  };
+  return { fn, calls };
+}
+const fakeReviewer = (): RunReviewer => capturingReviewer().fn;
+
+/** Common injected fakes for the whole pipeline (Phases 1–5). */
 function fakes(extra: Partial<Parameters<typeof runReview>[1]> = {}) {
   return {
     version: "0.1.0",
@@ -148,6 +159,7 @@ function fakes(extra: Partial<Parameters<typeof runReview>[1]> = {}) {
     ingest: fakeIngest(),
     prepareWorkspace: fakeWorkspace(),
     buildReviewPacket: fakeBuildPacket(),
+    runReviewer: fakeReviewer(),
     ...extra,
   };
 }
@@ -219,6 +231,63 @@ describe("runReview (integration)", () => {
     await expect(
       runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, verify: true, prepareWorkspace: failingWorkspace })),
     ).resolves.toBeUndefined();
+  });
+
+  it("passes the packet, markdown and config to the reviewer", async () => {
+    const rv = capturingReviewer();
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, runReviewer: rv.fn }));
+    expect(rv.calls).toHaveLength(1);
+    expect(rv.calls[0]?.packetMarkdown).toBe("# packet");
+    expect(rv.calls[0]?.packet.schemaVersion).toBe(1);
+    expect(rv.calls[0]?.config.models.primaryReviewer).toBe("claude");
+  });
+
+  it("propagates a ReviewerError raised by the reviewer", async () => {
+    const failing: RunReviewer = async () => {
+      throw new ReviewerError("missing ANTHROPIC_API_KEY");
+    };
+    await expect(
+      runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, runReviewer: failing })),
+    ).rejects.toBeInstanceOf(ReviewerError);
+  });
+
+  it("runs the real mock reviewer end-to-end and writes normalized findings", async () => {
+    await writeFile(join(dir, CONFIG_FILENAME), JSON.stringify({ models: { primaryReviewer: "mock" } }), "utf8");
+    const buildPacketWithFile: BuildReviewPacketFn = async () => ({
+      packet: {
+        ...makePacket(),
+        changedFiles: [
+          {
+            path: "src/x.ts",
+            status: "modified",
+            previousPath: null,
+            additions: 3,
+            deletions: 1,
+            patchOmitted: false,
+            patch: "@@ -1 +1 @@",
+            nearbyContext: null,
+          },
+        ],
+      },
+      markdown: "# packet",
+    });
+
+    // Note: no `runReviewer` injected — the real one (with MockReviewer) runs.
+    await runReview("https://github.com/org/repo/pull/123", {
+      version: "0.1.0",
+      reporter: silentReporter(),
+      ingest: fakeIngest(),
+      prepareWorkspace: fakeWorkspace(),
+      buildReviewPacket: buildPacketWithFile,
+      cwd: dir,
+    });
+
+    const findings = JSON.parse(
+      await readFile(join(dir, ".ai-review", "normalized", "all_findings.json"), "utf8"),
+    ) as Array<{ id: string; source_agent: string }>;
+    expect(findings.length).toBeGreaterThan(0);
+    expect(findings[0]?.source_agent).toBe("mock");
+    expect(findings[0]?.id).toMatch(/^mock-\d{3}$/);
   });
 
   it("propagates a GitHubError raised during ingestion", async () => {

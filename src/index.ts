@@ -50,7 +50,7 @@ export { buildRunMetadata } from "./runMetadata.js";
 export type { RunMetadata, CommandName } from "./runMetadata.js";
 
 export { runReview } from "./cli/commands/review.js";
-export type { ReviewOptions, PrepareWorkspaceFn } from "./cli/commands/review.js";
+export type { ReviewOptions, PrepareWorkspaceFn, BuildReviewPacketFn } from "./cli/commands/review.js";
 
 // Phase 3 — workspace prep + repo detection
 export { prepareWorkspace } from "./workspace/prepareWorkspace.js";
@@ -98,7 +98,49 @@ export type {
 } from "./context/types.js";
 
 export { Reporter, silentReporter } from "./ui/reporter.js";
-export type { ReporterOptions } from "./ui/reporter.js";
+export type { ReporterOptions, Spinner } from "./ui/reporter.js";
 export { selectBanner } from "./ui/banner.js";
 
-export { CliError, PrUrlError, ConfigError, GitHubError, WorkspaceError } from "./errors.js";
+// Phase 5 — findings schema + single reviewer
+export {
+  FindingSchema,
+  FindingCoreSchema,
+  ReviewerResponseSchema,
+  REVIEWER_OUTPUT_JSON_SCHEMA,
+  FINDING_CATEGORIES,
+  FINDING_SEVERITIES,
+} from "./findings/schema.js";
+export type {
+  Finding,
+  FindingCore,
+  FindingCategory,
+  FindingSeverity,
+} from "./findings/schema.js";
+export { partitionFindings } from "./findings/validateFinding.js";
+export type { PartitionResult, DroppedFinding } from "./findings/validateFinding.js";
+export { normalizeFindings } from "./findings/normalizeFindings.js";
+
+export { runReviewer } from "./agents/runReviewer.js";
+export type { RunReviewer, RunReviewerInput, RunReviewerResult } from "./agents/runReviewer.js";
+export { ClaudeReviewer } from "./agents/ClaudeReviewer.js";
+export { MockReviewer } from "./agents/MockReviewer.js";
+export { createAnthropicModelClient, REVIEWER_MODEL } from "./agents/anthropicClient.js";
+export { createClaudeCliModelClient } from "./agents/claudeCli.js";
+export type { ClaudeCliOptions, CliRunner, CliExecResult } from "./agents/claudeCli.js";
+export type {
+  ReviewerAgent,
+  ReviewerInput,
+  RawAgentResult,
+  ModelClient,
+  ModelRequest,
+  ModelResult,
+} from "./agents/types.js";
+
+export {
+  CliError,
+  PrUrlError,
+  ConfigError,
+  GitHubError,
+  WorkspaceError,
+  ReviewerError,
+} from "./errors.js";

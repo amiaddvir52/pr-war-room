@@ -20,6 +20,20 @@ const SYM = {
   warn: "⚠",
 } as const;
 
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const SPINNER_INTERVAL_MS = 80;
+
+/**
+ * A running-progress handle. Call `succeed`/`fail` (with the final step label) or
+ * `stop` when the awaited work finishes. On a TTY it animates in place; when
+ * output is piped/quiet/redirected it degrades to plain start + final lines.
+ */
+export interface Spinner {
+  succeed(label?: string): void;
+  fail(label?: string): void;
+  stop(): void;
+}
+
 /**
  * The single output seam for the CLI. Every command writes through a Reporter
  * so styling, quiet mode, and (later) a machine-readable mode live in one place.
@@ -31,6 +45,8 @@ export class Reporter {
   private readonly quiet: boolean;
   private readonly out: (line: string) => void;
   private readonly err: (line: string) => void;
+  /** Only animate when we own a real TTY stdout and aren't quiet. */
+  private readonly canAnimate: boolean;
 
   constructor(options: ReporterOptions = {}) {
     const color =
@@ -39,6 +55,8 @@ export class Reporter {
     this.quiet = options.quiet ?? false;
     this.out = options.out ?? ((line) => process.stdout.write(`${line}\n`));
     this.err = options.err ?? ((line) => process.stderr.write(`${line}\n`));
+    this.canAnimate =
+      options.out === undefined && process.stdout.isTTY === true && !this.quiet;
   }
 
   private print(line = ""): void {
@@ -95,6 +113,54 @@ export class Reporter {
 
   warn(message: string): void {
     this.print(`  ${this.c.yellow(SYM.warn)} ${message}`);
+  }
+
+  /**
+   * Start a spinner for a long-running step. On a TTY it animates a single line
+   * in place; otherwise it prints a plain start line. Resolve it with
+   * `succeed(label)` / `fail(label)` (prints the final ✓/✗ step) or `stop()`.
+   */
+  spinner(label: string): Spinner {
+    if (!this.canAnimate) {
+      // Non-TTY / quiet / injected sink: emit a start line, resolve via step().
+      this.print(`  ${this.c.dim(SYM.step)} ${this.c.dim(label)}`);
+      let done = false;
+      const finish = (final: string | undefined, ok: boolean): void => {
+        if (done) return;
+        done = true;
+        if (final !== undefined) this.step(final, ok);
+      };
+      return {
+        succeed: (l) => finish(l, true),
+        fail: (l) => finish(l, false),
+        stop: () => finish(undefined, true),
+      };
+    }
+
+    let i = 0;
+    const render = (): void => {
+      const frame = this.c.cyan(SPINNER_FRAMES[i % SPINNER_FRAMES.length]!);
+      // `\r` returns to line start; `\x1b[K` clears any leftover from a longer frame.
+      process.stdout.write(`\r  ${frame} ${label}\x1b[K`);
+      i++;
+    };
+    render();
+    const timer = setInterval(render, SPINNER_INTERVAL_MS);
+    timer.unref?.(); // never keep the process alive on the spinner alone
+
+    let done = false;
+    const finish = (final: string | undefined, ok: boolean): void => {
+      if (done) return;
+      done = true;
+      clearInterval(timer);
+      process.stdout.write("\r\x1b[K"); // wipe the spinner line
+      if (final !== undefined) this.step(final, ok);
+    };
+    return {
+      succeed: (l) => finish(l, true),
+      fail: (l) => finish(l, false),
+      stop: () => finish(undefined, true),
+    };
   }
 
   /** Errors always print (even in quiet mode) and go to the error sink. */

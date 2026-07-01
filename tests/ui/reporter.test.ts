@@ -46,4 +46,37 @@ describe("Reporter", () => {
     reporter.success("done");
     expect(out.join("")).toMatch(ANSI);
   });
+
+  describe("spinner (non-TTY path)", () => {
+    it("prints a start line then a succeeded step", () => {
+      const { reporter, out } = capture();
+      reporter.spinner("reviewing with claude…").succeed("reviewed code — 6 findings");
+      const text = out.join("\n");
+      expect(text).toContain("reviewing with claude");
+      expect(text).toContain("reviewed code — 6 findings");
+      expect(text).toContain("✓");
+      expect(text).not.toMatch(ANSI);
+    });
+
+    it("renders a failed step with the ✗ mark", () => {
+      const { reporter, out } = capture();
+      reporter.spinner("reviewing…").fail("reviewer failed");
+      const text = out.join("\n");
+      expect(text).toContain("reviewer failed");
+      expect(text).toContain("✗");
+    });
+
+    it("stop() resolves without printing a final step line", () => {
+      const { reporter, out } = capture();
+      reporter.spinner("working…").stop();
+      expect(out.join("\n")).toContain("working");
+      expect(out.join("\n")).not.toContain("✓");
+    });
+
+    it("is silent in quiet mode", () => {
+      const { reporter, out } = capture(true);
+      reporter.spinner("working…").succeed("done");
+      expect(out).toHaveLength(0);
+    });
+  });
 });

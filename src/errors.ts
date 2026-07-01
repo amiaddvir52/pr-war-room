@@ -43,3 +43,11 @@ export class WorkspaceError extends CliError {
     this.name = "WorkspaceError";
   }
 }
+
+/** Reviewer failure (missing model credentials, unknown reviewer). Exit code 6. */
+export class ReviewerError extends CliError {
+  constructor(message: string) {
+    super(message, 6);
+    this.name = "ReviewerError";
+  }
+}

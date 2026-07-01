@@ -14,6 +14,8 @@ import type {
   BuildReviewPacketInput,
   BuildReviewPacketResult,
 } from "../../context/buildReviewPacket.js";
+import { runReviewer } from "../../agents/runReviewer.js";
+import type { RunReviewer } from "../../agents/runReviewer.js";
 
 /** Phase-3 workspace prep. Injected so tests avoid git/subprocess side effects. */
 export type PrepareWorkspaceFn = (input: PrepareWorkspaceInput) => Promise<WorkspaceResult>;
@@ -37,6 +39,8 @@ export interface ReviewOptions {
   prepareWorkspace?: PrepareWorkspaceFn;
   /** Review-packet builder. Defaults to the real one; inject a fake in tests. */
   buildReviewPacket?: BuildReviewPacketFn;
+  /** Phase-5 single reviewer. Defaults to the real one; inject a fake in tests. */
+  runReviewer?: RunReviewer;
 }
 
 /**
@@ -52,6 +56,7 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   const ingest = options.ingest ?? ingestPullRequest;
   const prepareWs = options.prepareWorkspace ?? prepareWorkspace;
   const buildPacket = options.buildReviewPacket ?? buildReviewPacket;
+  const review = options.runReviewer ?? runReviewer;
 
   const pr = parsePrUrl(prUrl);
   const { config, source, path } = await loadConfig(cwd);
@@ -120,7 +125,7 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   }
 
   // Phase 4 — assemble the structured review packet from everything gathered.
-  const { packet } = await buildPacket({
+  const { packet, markdown } = await buildPacket({
     pr,
     prMetadata: result.metadata,
     changedFiles: result.changedFiles,
@@ -136,6 +141,25 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
     );
   }
 
+  // Phase 5 — run a single reviewer and write validated, normalized findings.
+  // A hard failure (missing credentials) throws ReviewerError and aborts; a
+  // parse failure is reported by the reviewer and leaves an empty findings set.
   reporter.blank();
-  reporter.note("Phase 4 — AI review agents are not wired up yet.");
+  const reviewResult = await review({
+    packet,
+    packetMarkdown: markdown,
+    config,
+    paths,
+    reporter,
+  });
+
+  reporter.blank();
+  if (reviewResult.findings.length > 0) {
+    reporter.success(
+      `${reviewResult.findings.length} finding${reviewResult.findings.length === 1 ? "" : "s"} — see ${relative(paths.root, paths.normalized.allFindings)}`,
+    );
+  } else {
+    reporter.note("No findings recorded.");
+  }
+  reporter.note("Dedupe, skeptic, judge and report generation arrive in later phases.");
 }
