@@ -13,10 +13,14 @@ patches.
 
 ## Status
 
-This repo is being built in phases (see `Full PRD.rtf`). **Phase 1** is
-implemented: the CLI skeleton, configuration system, PR-URL parsing, and the
-`.ai-review/` artifact layout. GitHub ingestion and the AI agents arrive in
-later phases.
+This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–2** are
+implemented: the CLI skeleton, configuration system, PR-URL parsing, the
+`.ai-review/` artifact layout, and **GitHub PR ingestion** (metadata, changed
+files, and diff). The AI review agents arrive in later phases.
+
+GitHub access uses `GITHUB_TOKEN` if set, otherwise `GH_TOKEN`, otherwise the
+`gh` CLI (`gh auth token`). If none is available the tool prints a setup
+message and exits.
 
 ## Requirements
 
@@ -40,9 +44,9 @@ pnpm dev review https://github.com/org/repo/pull/123
 pr-war-room review https://github.com/org/repo/pull/123
 ```
 
-Every run writes artifacts under `.ai-review/` in the current directory. In
-Phase 1, `review` parses the URL, resolves config, and writes
-`.ai-review/run_metadata.json`.
+Every run writes artifacts under `.ai-review/` in the current directory:
+`run_metadata.json`, plus `github/pr_metadata.json`, `github/changed_files.json`,
+and `github/diff.patch` from the ingested PR.
 
 `fix` and `eval` are registered but not yet implemented.
 

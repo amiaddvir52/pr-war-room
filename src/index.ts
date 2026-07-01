@@ -6,6 +6,28 @@
 export { parsePrUrl } from "./github/parsePrUrl.js";
 export type { ParsedPr } from "./github/parsePrUrl.js";
 
+export { resolveGitHubToken } from "./github/auth.js";
+export { createGitHubClient, mapGitHubError } from "./github/client.js";
+export { ingestPullRequest } from "./github/ingestPullRequest.js";
+export {
+  PrMetadataSchema,
+  ChangedFileSchema,
+  ChangedFilesArtifactSchema,
+  toPrMetadata,
+  toChangedFile,
+} from "./github/schema.js";
+export type {
+  PrMetadata,
+  ChangedFile,
+  ChangedFilesArtifact,
+  IngestResult,
+  IngestContext,
+  IngestPullRequest,
+  ResolvedToken,
+  TokenSource,
+  GitHubClient,
+} from "./github/types.js";
+
 export {
   loadConfig,
   mergeConfig,
@@ -34,4 +56,4 @@ export { Reporter, silentReporter } from "./ui/reporter.js";
 export type { ReporterOptions } from "./ui/reporter.js";
 export { selectBanner } from "./ui/banner.js";
 
-export { CliError, PrUrlError, ConfigError } from "./errors.js";
+export { CliError, PrUrlError, ConfigError, GitHubError } from "./errors.js";

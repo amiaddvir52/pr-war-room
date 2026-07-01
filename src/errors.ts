@@ -27,3 +27,11 @@ export class ConfigError extends CliError {
     this.name = "ConfigError";
   }
 }
+
+/** GitHub ingestion failure (auth, API, or network). Exit code 4. */
+export class GitHubError extends CliError {
+  constructor(message: string) {
+    super(message, 4);
+    this.name = "GitHubError";
+  }
+}
