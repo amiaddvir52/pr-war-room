@@ -7,6 +7,11 @@ import { buildRunMetadata } from "../../runMetadata.js";
 import { Reporter } from "../../ui/reporter.js";
 import { selectBanner } from "../../ui/banner.js";
 import { ingestPullRequest, type IngestPullRequest } from "../../github/ingestPullRequest.js";
+import { prepareWorkspace } from "../../workspace/prepareWorkspace.js";
+import type { PrepareWorkspaceInput, WorkspaceResult } from "../../workspace/prepareWorkspace.js";
+
+/** Phase-3 workspace prep. Injected so tests avoid git/subprocess side effects. */
+export type PrepareWorkspaceFn = (input: PrepareWorkspaceInput) => Promise<WorkspaceResult>;
 
 export interface ReviewOptions {
   version: string;
@@ -16,6 +21,10 @@ export interface ReviewOptions {
   reporter?: Reporter;
   /** GitHub ingestion. Defaults to the real fetcher; inject a fake in tests to avoid the network. */
   ingest?: IngestPullRequest;
+  /** `--verify` flag: run verification commands. Overrides config.verification.enabled when set. */
+  verify?: boolean;
+  /** Workspace preparation. Defaults to the real one; inject a fake in tests. */
+  prepareWorkspace?: PrepareWorkspaceFn;
 }
 
 /**
@@ -29,6 +38,7 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   const cwd = options.cwd ?? process.cwd();
   const reporter = options.reporter ?? new Reporter();
   const ingest = options.ingest ?? ingestPullRequest;
+  const prepareWs = options.prepareWorkspace ?? prepareWorkspace;
 
   const pr = parsePrUrl(prUrl);
   const { config, source, path } = await loadConfig(cwd);
@@ -73,6 +83,29 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   reporter.step("fetched PR metadata");
   reporter.step(`fetched ${result.changedFiles.totalCount} changed files`);
   reporter.step(result.diff !== null ? "fetched diff" : "diff skipped (too large)", result.diff !== null);
+
+  // Phase 3 — local workspace + repo detection (+ optional verification).
+  const workspace = await prepareWs({
+    pr,
+    config,
+    paths,
+    cwd,
+    ...(options.verify !== undefined ? { verify: options.verify } : {}),
+  });
+  const ws = workspace.metadata;
+  reporter.step(ws.reused ? "reused workspace" : "checked out PR head");
+  reporter.step(`detected ${ws.projectTypes.join(", ") || "unknown"} project`);
+  if (workspace.verification.ran) {
+    reporter.step("ran verification", workspace.verification.allPassed);
+    if (!workspace.verification.allPassed) {
+      reporter.warn(
+        `Some verification commands failed — see ${relative(paths.root, paths.verification.initial)}`,
+      );
+    }
+  } else {
+    reporter.note("Verification skipped — pass --verify to run install + test/lint/build.");
+  }
+
   reporter.blank();
-  reporter.note("Phase 2 — review packet and AI agents are not wired up yet.");
+  reporter.note("Phase 3 — review packet and AI agents are not wired up yet.");
 }

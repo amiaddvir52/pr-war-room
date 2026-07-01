@@ -35,3 +35,11 @@ export class GitHubError extends CliError {
     this.name = "GitHubError";
   }
 }
+
+/** Local workspace preparation failure (git clone/fetch/checkout). Exit code 5. */
+export class WorkspaceError extends CliError {
+  constructor(message: string) {
+    super(message, 5);
+    this.name = "WorkspaceError";
+  }
+}

@@ -3,10 +3,12 @@ import { mkdtemp, rm, writeFile, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runReview } from "../../src/cli/commands/review.js";
+import type { PrepareWorkspaceFn } from "../../src/cli/commands/review.js";
 import { PrUrlError, GitHubError } from "../../src/errors.js";
 import { CONFIG_FILENAME } from "../../src/config/loadConfig.js";
 import { silentReporter } from "../../src/ui/reporter.js";
 import type { IngestPullRequest, IngestResult } from "../../src/github/types.js";
+import type { PrepareWorkspaceInput, WorkspaceResult } from "../../src/workspace/types.js";
 
 async function readJson(dir: string, ...segments: string[]): Promise<Record<string, unknown>> {
   const raw = await readFile(join(dir, ".ai-review", ...segments), "utf8");
@@ -51,6 +53,57 @@ const fakeIngest =
   async () =>
     makeIngestResult(overrides);
 
+function makeWorkspaceResult(overrides: { allPassed?: boolean; ran?: boolean } = {}): WorkspaceResult {
+  const ran = overrides.ran ?? false;
+  return {
+    metadata: {
+      schemaVersion: 1,
+      repoDir: ".ai-review/workspace/repo",
+      remote: "https://github.com/org/repo.git",
+      ref: "pull/123/head",
+      headSha: "deadbeef",
+      reused: false,
+      projectTypes: ["node"],
+      packageManager: "npm",
+      detected: { install: "npm ci", commands: ["npm run test"] },
+      verification: {
+        enabled: ran,
+        enabledSource: ran ? "flag" : "default",
+        installPlanned: "npm ci",
+        commandsPlanned: ["npm run test"],
+      },
+      preparedAt: "2026-01-01T00:00:00.000Z",
+    },
+    verification: {
+      schemaVersion: 1,
+      enabled: ran,
+      enabledSource: ran ? "flag" : "default",
+      ran,
+      skipReason: ran ? null : "disabled",
+      detectedCommands: ["npm run test"],
+      configuredCommands: [],
+      installCommand: "npm ci",
+      executedCommands: ran ? ["npm run test"] : [],
+      skippedCommands: ran ? [] : ["npm run test"],
+      install: null,
+      results: [],
+      allPassed: overrides.allPassed ?? true,
+      startedAt: null,
+      finishedAt: null,
+    },
+  };
+}
+
+function capturingWorkspace(): { fn: PrepareWorkspaceFn; calls: PrepareWorkspaceInput[] } {
+  const calls: PrepareWorkspaceInput[] = [];
+  const fn: PrepareWorkspaceFn = async (input) => {
+    calls.push(input);
+    return makeWorkspaceResult();
+  };
+  return { fn, calls };
+}
+const fakeWorkspace = (): PrepareWorkspaceFn => capturingWorkspace().fn;
+
 describe("runReview (integration)", () => {
   let dir: string;
 
@@ -67,6 +120,7 @@ describe("runReview (integration)", () => {
       cwd: dir,
       reporter: silentReporter(),
       ingest: fakeIngest(),
+      prepareWorkspace: fakeWorkspace(),
     });
     const meta = await readJson(dir, "run_metadata.json");
     expect(meta["pr"]).toEqual({ owner: "org", repo: "repo", number: 123 });
@@ -86,6 +140,7 @@ describe("runReview (integration)", () => {
       cwd: dir,
       reporter: silentReporter(),
       ingest: fakeIngest(),
+      prepareWorkspace: fakeWorkspace(),
     });
     const meta = await readJson(dir, "run_metadata.json");
     expect(meta["configSource"]).toBe("file");
@@ -98,6 +153,7 @@ describe("runReview (integration)", () => {
       cwd: dir,
       reporter: silentReporter(),
       ingest: fakeIngest(),
+      prepareWorkspace: fakeWorkspace(),
     });
     const prMeta = await readJson(dir, "github", "pr_metadata.json");
     expect(prMeta["number"]).toBe(123);
@@ -113,8 +169,51 @@ describe("runReview (integration)", () => {
       cwd: dir,
       reporter: silentReporter(),
       ingest: fakeIngest({ diff: null }),
+      prepareWorkspace: fakeWorkspace(),
     });
     await expect(stat(join(dir, ".ai-review", "github", "diff.patch"))).rejects.toThrow();
+  });
+
+  it("invokes workspace prep once, without verify by default", async () => {
+    const ws = capturingWorkspace();
+    await runReview("https://github.com/org/repo/pull/123", {
+      version: "0.1.0",
+      cwd: dir,
+      reporter: silentReporter(),
+      ingest: fakeIngest(),
+      prepareWorkspace: ws.fn,
+    });
+    expect(ws.calls).toHaveLength(1);
+    expect(ws.calls[0]?.verify).toBeUndefined();
+    expect(ws.calls[0]?.pr).toEqual({ owner: "org", repo: "repo", number: 123 });
+  });
+
+  it("threads verify=true through to workspace prep", async () => {
+    const ws = capturingWorkspace();
+    await runReview("https://github.com/org/repo/pull/123", {
+      version: "0.1.0",
+      cwd: dir,
+      reporter: silentReporter(),
+      ingest: fakeIngest(),
+      verify: true,
+      prepareWorkspace: ws.fn,
+    });
+    expect(ws.calls[0]?.verify).toBe(true);
+  });
+
+  it("does not fail the review when verification reports allPassed:false", async () => {
+    const failingWorkspace: PrepareWorkspaceFn = async () =>
+      makeWorkspaceResult({ ran: true, allPassed: false });
+    await expect(
+      runReview("https://github.com/org/repo/pull/123", {
+        version: "0.1.0",
+        cwd: dir,
+        reporter: silentReporter(),
+        ingest: fakeIngest(),
+        verify: true,
+        prepareWorkspace: failingWorkspace,
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it("propagates a GitHubError raised during ingestion", async () => {
@@ -127,6 +226,7 @@ describe("runReview (integration)", () => {
         cwd: dir,
         reporter: silentReporter(),
         ingest: failing,
+        prepareWorkspace: fakeWorkspace(),
       }),
     ).rejects.toBeInstanceOf(GitHubError);
   });
@@ -138,6 +238,7 @@ describe("runReview (integration)", () => {
         cwd: dir,
         reporter: silentReporter(),
         ingest: fakeIngest(),
+        prepareWorkspace: fakeWorkspace(),
       }),
     ).rejects.toThrow(PrUrlError);
     await expect(stat(join(dir, ".ai-review"))).rejects.toThrow();

@@ -11,7 +11,13 @@ export const defaultConfig: Config = {
     judge: "claude",
   },
   verification: {
-    commands: ["npm test", "npm run lint"],
+    // Empty by default so Phase 3's detection drives which commands run; set
+    // commands here to override detection. `enabled: false` means detect-only —
+    // pass `--verify` (or set `enabled: true`) to actually execute them.
+    commands: [],
+    enabled: false,
+    installDeps: true,
+    timeoutMs: 600_000,
   },
   review: {
     maxFindings: 20,

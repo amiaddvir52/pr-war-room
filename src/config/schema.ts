@@ -15,7 +15,18 @@ export const ModelsConfigSchema = z.object({
 });
 
 export const VerificationConfigSchema = z.object({
-  commands: z.array(z.string()),
+  // When non-empty, these run instead of the auto-detected commands (Phase 3).
+  commands: z.array(z.string()).default([]),
+  // Whether verification commands actually execute. Detection always runs; a
+  // false value (the default) means "detect only". The `--verify` CLI flag
+  // overrides this to true. Opt-in because running a PR's scripts executes
+  // untrusted code locally.
+  enabled: z.boolean().default(false),
+  // Install dependencies (npm ci / pip install / go mod download) before
+  // verification. Ignored when verification does not run.
+  installDeps: z.boolean().default(true),
+  // Per-command timeout in milliseconds (applies to install and each command).
+  timeoutMs: z.number().int().positive().default(600_000),
 });
 
 export const ReviewConfigSchema = z.object({

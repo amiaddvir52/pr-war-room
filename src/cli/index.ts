@@ -32,8 +32,16 @@ export function buildProgram(version: string): Command {
     .command("review")
     .argument("<pr-url>", "GitHub pull request URL")
     .description("Run the AI pre-review flow on a pull request")
-    .action(async (prUrl: string) => {
-      await runReview(prUrl, { version, reporter: reporterFor() });
+    .option(
+      "--verify",
+      "run verification commands (install deps, then test/lint/build) on the checked-out PR",
+    )
+    .action(async (prUrl: string, options: { verify?: boolean }) => {
+      await runReview(prUrl, {
+        version,
+        reporter: reporterFor(),
+        ...(options.verify ? { verify: true } : {}),
+      });
     });
 
   program

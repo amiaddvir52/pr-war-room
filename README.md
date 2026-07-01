@@ -13,10 +13,12 @@ patches.
 
 ## Status
 
-This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–2** are
+This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–3** are
 implemented: the CLI skeleton, configuration system, PR-URL parsing, the
-`.ai-review/` artifact layout, and **GitHub PR ingestion** (metadata, changed
-files, and diff). The AI review agents arrive in later phases.
+`.ai-review/` artifact layout, **GitHub PR ingestion** (metadata, changed files,
+and diff), and the **local workspace** — a shallow checkout of the PR head, with
+project-type / package-manager / verification-command detection and optional
+verification runs. The AI review agents arrive in later phases.
 
 GitHub access uses `GITHUB_TOKEN` if set, otherwise `GH_TOKEN`, otherwise the
 `gh` CLI (`gh auth token`). If none is available the tool prints a setup
@@ -42,11 +44,20 @@ pnpm dev review https://github.com/org/repo/pull/123
 
 # After build (or when installed globally):
 pr-war-room review https://github.com/org/repo/pull/123
+
+# Also run the detected/configured verification commands (install + test/lint/build):
+pr-war-room review https://github.com/org/repo/pull/123 --verify
 ```
 
 Every run writes artifacts under `.ai-review/` in the current directory:
-`run_metadata.json`, plus `github/pr_metadata.json`, `github/changed_files.json`,
-and `github/diff.patch` from the ingested PR.
+`run_metadata.json`; `github/pr_metadata.json`, `github/changed_files.json`, and
+`github/diff.patch` from the ingested PR; `workspace/repo/` (a shallow checkout of
+the PR head), `workspace/workspace_metadata.json`, and
+`verification/initial_verification.json`.
+
+Verification is **opt-in**: detection always runs, but commands only execute with
+`--verify` (or `verification.enabled: true`). This matters because running a PR's
+scripts executes its code locally. Add `.ai-review/` to your ignore rules.
 
 `fix` and `eval` are registered but not yet implemented.
 
@@ -64,7 +75,10 @@ the current directory, in which case it is deep-merged over the defaults
     "judge": "claude"
   },
   "verification": {
-    "commands": ["npm test", "npm run lint"]
+    "commands": [],
+    "enabled": false,
+    "installDeps": true,
+    "timeoutMs": 600000
   },
   "review": {
     "maxFindings": 20,
@@ -72,6 +86,10 @@ the current directory, in which case it is deep-merged over the defaults
   }
 }
 ```
+
+`verification.commands` is empty by default so detection picks the commands; set
+it to override detection. `enabled` (or the `--verify` flag) turns execution on;
+`installDeps` installs dependencies first; `timeoutMs` bounds each command.
 
 ## Development
 

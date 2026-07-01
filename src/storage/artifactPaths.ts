@@ -16,7 +16,7 @@ export interface ArtifactPaths {
 
   // Phase 3 — local workspace + verification
   workspace: { dir: string; repo: string; metadata: string };
-  verification: { dir: string; initial: string };
+  verification: { dir: string; initial: string; logsDir: string };
 
   // Phase 4 — review packet
   context: { dir: string; packetMd: string; packetJson: string };
@@ -82,6 +82,7 @@ export function getArtifactPaths(baseDir: string): ArtifactPaths {
     verification: {
       dir: p("verification"),
       initial: p("verification", "initial_verification.json"),
+      logsDir: p("verification", "logs"),
     },
 
     context: {

@@ -50,10 +50,43 @@ export { buildRunMetadata } from "./runMetadata.js";
 export type { RunMetadata, CommandName } from "./runMetadata.js";
 
 export { runReview } from "./cli/commands/review.js";
-export type { ReviewOptions } from "./cli/commands/review.js";
+export type { ReviewOptions, PrepareWorkspaceFn } from "./cli/commands/review.js";
+
+// Phase 3 — workspace prep + repo detection
+export { prepareWorkspace } from "./workspace/prepareWorkspace.js";
+export { prepareRepo } from "./workspace/git.js";
+export { runCommand } from "./workspace/runCommand.js";
+export type {
+  WorkspaceMetadata,
+  VerificationResults,
+  CommandExecution,
+  EnabledSource,
+  CommandResult,
+  RunCommandOptions,
+  CommandRunner,
+  GitRunner,
+  GitRunResult,
+  PrepareRepoInput,
+  PreparedRepo,
+  PrepareWorkspaceInput,
+  WorkspaceResult,
+} from "./workspace/types.js";
+export {
+  detectProjectTypes,
+  detectPackageManager,
+  PROJECT_TYPES,
+  PACKAGE_MANAGERS,
+} from "./context/detectProjectType.js";
+export { detectVerificationCommands } from "./context/detectVerificationCommands.js";
+export type {
+  ProjectType,
+  PackageManager,
+  DetectedCommands,
+  DetectVerificationInput,
+} from "./context/types.js";
 
 export { Reporter, silentReporter } from "./ui/reporter.js";
 export type { ReporterOptions } from "./ui/reporter.js";
 export { selectBanner } from "./ui/banner.js";
 
-export { CliError, PrUrlError, ConfigError, GitHubError } from "./errors.js";
+export { CliError, PrUrlError, ConfigError, GitHubError, WorkspaceError } from "./errors.js";
