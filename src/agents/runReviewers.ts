@@ -202,31 +202,31 @@ async function runOne(
   };
 }
 
-function reportAgent(reporter: Reporter, run: AgentRun): void {
-  const label = `${run.name} (${run.angle})`;
+/**
+ * Map a finished run to its board row: ✓ (usable output) or ✗, plus a short
+ * detail. The longer failure diagnostic is emitted separately by `warnFailure`,
+ * below the board, so it doesn't get squeezed onto the live row.
+ */
+function boardResult(run: AgentRun): { status: "ok" | "fail"; detail: string } {
   const dropped = run.droppedCount > 0 ? ` (${run.droppedCount} dropped)` : "";
-  switch (run.status) {
-    case "ok":
-      reporter.step(
-        `${label} — ${run.findingCount} finding${run.findingCount === 1 ? "" : "s"}${dropped}`,
-        true,
-      );
-      break;
-    case "no_findings":
-      // Valid output, legitimately empty — a success, not a failure.
-      reporter.step(`${label} — no findings${dropped}`, true);
-      break;
-    case "unusable_output":
-      reporter.step(`${label} — unusable output`, false);
-      if (run.parseError) reporter.warn(`${run.name}: ${run.parseError}`);
-      break;
-    case "timeout":
-      reporter.step(`${label} — timed out`, false);
-      break;
-    case "failed":
-      reporter.step(`${label} — failed`, false);
-      if (run.error) reporter.warn(`${run.name}: ${firstLine(run.error)}`);
-      break;
+  if (run.status === "ok") {
+    return {
+      status: "ok",
+      detail: `${run.findingCount} finding${run.findingCount === 1 ? "" : "s"}${dropped}`,
+    };
+  }
+  if (run.status === "no_findings") return { status: "ok", detail: `no findings${dropped}` };
+  if (run.status === "unusable_output") return { status: "fail", detail: "unusable output" };
+  if (run.status === "timeout") return { status: "fail", detail: "timed out" };
+  return { status: "fail", detail: "failed" };
+}
+
+/** Emit the diagnostic for a non-usable run (shown once, below the finished board). */
+function warnFailure(reporter: Reporter, run: AgentRun): void {
+  if (run.status === "unusable_output" && run.parseError) {
+    reporter.warn(`${run.name}: ${run.parseError}`);
+  } else if (run.status === "failed" && run.error) {
+    reporter.warn(`${run.name}: ${firstLine(run.error)}`);
   }
 }
 
@@ -250,24 +250,21 @@ export const runReviewers: RunReviewers = async (input) => {
     );
   }
 
-  // Show the roster up front, then stream each agent's result the moment it
-  // finishes (completion order) above a spinner that ticks a live done-count —
-  // so a slow reviewer doesn't leave the user staring at one opaque line.
-  const total = specs.length;
-  reporter.note(`reviewers queued: ${specs.map((s) => s.angle).join(", ")}`);
-  const spin = reporter.spinner(`reviewing (0/${total} done)…`);
-  let doneCount = 0;
+  // Live board: one row per reviewer, flipping queued → running → ✓/✗ in place,
+  // so the user sees every agent and which are still running. (Off a TTY it
+  // degrades to one line per agent as each resolves.)
+  const board = reporter.board(specs.map((s) => ({ key: s.name, label: `${s.name} (${s.angle})` })));
   let outcomes: Array<{ run: AgentRun; findings: Finding[] }>;
   try {
     outcomes = await mapWithConcurrency(specs, config.agents.concurrency, async (spec) => {
+      board.set(spec.name, "running");
       const outcome = await runOne(spec, input);
-      doneCount += 1;
-      spin.logAbove(() => reportAgent(reporter, outcome.run));
-      spin.update(`reviewing (${doneCount}/${total} done)…`);
+      const { status, detail } = boardResult(outcome.run);
+      board.set(spec.name, status, detail);
       return outcome;
     });
   } finally {
-    spin.stop();
+    board.stop();
   }
 
   const agents = outcomes.map((o) => o.run);
@@ -275,6 +272,9 @@ export const runReviewers: RunReviewers = async (input) => {
 
   await writeJsonArtifact(paths.normalized.allFindings, findings);
   await writeJsonArtifact(paths.raw.agentRuns, { schemaVersion: 1, agents });
+
+  // Surface any failure diagnostics once, below the finished board.
+  for (const run of agents) warnFailure(reporter, run);
 
   const usable = agents.filter((a) => isUsable(a.status));
   const minUsable = config.agents.minUsableReviewers;

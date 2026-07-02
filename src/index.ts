@@ -104,7 +104,7 @@ export type {
 } from "./context/types.js";
 
 export { Reporter, silentReporter } from "./ui/reporter.js";
-export type { ReporterOptions, Spinner } from "./ui/reporter.js";
+export type { ReporterOptions, Spinner, Board, BoardItem, BoardStatus } from "./ui/reporter.js";
 export { selectBanner } from "./ui/banner.js";
 
 // Phase 5 — findings schema + single reviewer
