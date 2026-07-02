@@ -154,6 +154,25 @@ export const DedupConfigSchema = z
   .default({});
 
 /**
+ * Skeptic / evidence validation (Phase 8, PRD §10.7). Unlike the dedup
+ * adjudicator, the skeptic is ON by default — it is the product's precision
+ * gate, and it runs on the same `claude` backend as the reviewers. Deterministic
+ * file/line/diff checks always run inside the phase; the LLM skeptic runs unless
+ * the backend is `mock` (which validates deterministically for offline runs).
+ */
+export const SkepticConfigSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    backend: ReviewerBackendSchema.default("claude"),
+    // Max clusters validated at once (each may spawn a subprocess / model call).
+    concurrency: z.number().int().positive().default(4),
+    // Per-cluster timeout in ms. A skeptic that hangs is recorded and the
+    // finding is kept (recall-first), never dropped on an infra hiccup.
+    timeoutMs: z.number().int().positive().default(60_000),
+  })
+  .default({});
+
+/**
  * CI options are pre-declared (optional/inert) so a config can already set them
  * and Phase 15 can activate them without breaking existing configs.
  */
@@ -172,6 +191,7 @@ export const ConfigSchema = z
     review: ReviewConfigSchema,
     context: ContextConfigSchema.default({}),
     dedup: DedupConfigSchema,
+    skeptic: SkepticConfigSchema,
     ci: CiConfigSchema.optional(),
   })
   // Reject unknown top-level keys so typos in a user config fail loudly.
@@ -186,5 +206,6 @@ export type VerificationConfig = z.infer<typeof VerificationConfigSchema>;
 export type ReviewConfig = z.infer<typeof ReviewConfigSchema>;
 export type ContextConfig = z.infer<typeof ContextConfigSchema>;
 export type DedupConfig = z.infer<typeof DedupConfigSchema>;
+export type SkepticConfig = z.infer<typeof SkepticConfigSchema>;
 export type CiConfig = z.infer<typeof CiConfigSchema>;
 export type Config = z.infer<typeof ConfigSchema>;

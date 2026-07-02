@@ -18,6 +18,8 @@ import { runReviewers, isUsable } from "../../agents/runReviewers.js";
 import type { RunReviewers } from "../../agents/runReviewers.js";
 import { deduplicateFindings } from "../../findings/deduplicateFindings.js";
 import { createDedupAdjudicator } from "../../agents/DedupAdjudicator.js";
+import { runSkeptic, selectSupportedClusters } from "../../agents/runSkeptic.js";
+import type { RunSkeptic } from "../../agents/runSkeptic.js";
 
 /** Phase-3 workspace prep. Injected so tests avoid git/subprocess side effects. */
 export type PrepareWorkspaceFn = (input: PrepareWorkspaceInput) => Promise<WorkspaceResult>;
@@ -43,6 +45,8 @@ export interface ReviewOptions {
   buildReviewPacket?: BuildReviewPacketFn;
   /** Phase-6 multi-agent reviewer fan-out. Defaults to the real one; inject a fake in tests. */
   runReviewers?: RunReviewers;
+  /** Phase-8 skeptic / evidence validation. Defaults to the real one; inject a fake in tests. */
+  skeptic?: RunSkeptic;
 }
 
 /**
@@ -59,6 +63,7 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   const prepareWs = options.prepareWorkspace ?? prepareWorkspace;
   const buildPacket = options.buildReviewPacket ?? buildReviewPacket;
   const review = options.runReviewers ?? runReviewers;
+  const skeptic = options.skeptic ?? runSkeptic;
 
   const pr = parsePrUrl(prUrl);
   const { config, source, path } = await loadConfig(cwd);
@@ -200,5 +205,29 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
       ` — see ${artifactLink(paths.deduped.clusters)}`,
   );
 
-  reporter.note("Skeptic, judge and report generation arrive in later phases.");
+  // Phase 8 — skeptic / evidence validation. Each cluster is challenged with
+  // deterministic file/line/diff checks and (unless disabled) an LLM skeptic that
+  // tries to disprove it. Clusters the skeptic drops are excluded from the
+  // candidate list that will feed the judge; borderline ones are kept, annotated.
+  if (config.skeptic.enabled) {
+    reporter.blank();
+    const { results } = await skeptic({ clusters, packet, config, reporter });
+    await writeJsonArtifact(paths.skeptic.results, results);
+
+    const supported = selectSupportedClusters(clusters, results);
+    const droppedCount = clusters.length - supported.length;
+    reporter.success(
+      `${supported.length}/${clusters.length} cluster${clusters.length === 1 ? "" : "s"} supported by the skeptic` +
+        (droppedCount > 0 ? ` (${droppedCount} dropped as unsupported)` : "") +
+        ` — see ${artifactLink(paths.skeptic.results)}`,
+    );
+    for (const r of results.filter((res) => res.decision.action === "drop")) {
+      const cluster = clusters.find((c) => c.cluster_id === r.cluster_id);
+      reporter.warn(`dropped ${cluster?.merged_title ?? r.cluster_id} — ${r.decision.reason}`);
+    }
+  } else {
+    reporter.note("Skeptic disabled (skeptic.enabled = false) — all clusters kept as candidates.");
+  }
+
+  reporter.note("Judge and report generation arrive in later phases.");
 }

@@ -13,7 +13,7 @@ patches.
 
 ## Status
 
-This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–7** are
+This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–8** are
 implemented: the CLI skeleton, configuration system, PR-URL parsing, the
 `.ai-review/` artifact layout, **GitHub PR ingestion** (metadata, changed files,
 and diff), the **local workspace** (a shallow checkout of the PR head with
@@ -25,8 +25,11 @@ fan-out**: several independent review agents run in parallel against the packet,
 each with its own review angle, and their validated findings are merged into a
 single normalized set — then **deduplicated**: overlapping findings from
 different agents are clustered into one issue each (singletons included), so
-later phases see a de-duplicated set. The skeptic and judge steps and report
-generation arrive next.
+later phases see a de-duplicated set — then **evidence-validated by a skeptic**:
+each cluster is challenged with deterministic file/line/diff checks and (unless
+disabled) an LLM skeptic that tries to disprove it, so unsupported findings are
+dropped from the candidate list and only survivors move on. The judge step and
+report generation arrive next.
 
 GitHub access uses `GITHUB_TOKEN` if set, otherwise `GH_TOKEN`, otherwise
 `GITHUB_PERSONAL_ACCESS_TOKEN` (the same token the GitHub MCP server uses, so if
@@ -185,6 +188,24 @@ text similarity decides the rest — `mergeThreshold` auto-merges, anything belo
 two is decided by an optional LLM adjudicator, which is **off by default**
 (`dedup.llm.enabled: false`) so runs stay deterministic and make no extra model
 calls; enabling it reuses the same `backend` clients as the reviewers.
+
+`skeptic` (Phase 8) controls evidence validation. It is **on by default**
+(`skeptic.enabled: true`, `backend: "claude"`), the product's precision gate.
+Deterministic checks always run and are split by consequence: only an
+**objective hard failure** — the referenced file is not in the PR's changeset at
+all — may drop a finding without the model. Weak anchoring (a line outside the
+diff and its nearby-context window, or a partial/inverted line range) is a
+**soft warning** that downgrades and annotates, never drops; the "near the diff"
+window follows `context.nearbyContextLines` so it matches the code the reviewer
+was shown. The LLM skeptic then tries to disprove each cluster; set
+`backend: "mock"` to validate deterministically with no model call (offline).
+The drop policy is **recall-first**: the model's raw verdict is kept separate
+from the final decision, and the model can only drop a finding it rules
+`unsupported` + `high`-risk — any other "drop" is softened to a kept "downgrade".
+If the skeptic can't run (timeout / refusal / parse failure / construction
+failure / unexpected error), the finding is kept and the failure is recorded —
+never silently swallowed, and never aborts the run. `concurrency` bounds
+parallel calls; `timeoutMs` bounds each.
 
 ## Development
 

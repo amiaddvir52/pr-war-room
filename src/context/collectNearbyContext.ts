@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { readTextIfExists } from "./fsProbe.js";
+import { mergeRanges, parseHunkNewRanges } from "./hunkRanges.js";
 
 /**
  * Extract line-numbered code around a changed file's hunks, read from the
@@ -9,36 +10,11 @@ import { readTextIfExists } from "./fsProbe.js";
  * window, merged, and capped in total lines.
  */
 
+// Hunk parsing lives in `./hunkRanges` so the skeptic's evidence checks use the
+// exact same parser. Re-exported here for existing importers.
+export { mergeRanges, parseHunkNewRanges } from "./hunkRanges.js";
+
 const DEFAULT_MAX_NEARBY_LINES = 400;
-const HUNK_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm;
-
-/** New-file [start, end] (1-based, inclusive) line ranges touched by the patch. */
-export function parseHunkNewRanges(patch: string): Array<[number, number]> {
-  const ranges: Array<[number, number]> = [];
-  let m: RegExpExecArray | null;
-  HUNK_RE.lastIndex = 0;
-  while ((m = HUNK_RE.exec(patch)) !== null) {
-    const start = Number(m[1]);
-    const len = m[2] === undefined ? 1 : Number(m[2]);
-    if (len > 0 && Number.isFinite(start)) ranges.push([start, start + len - 1]);
-  }
-  return ranges;
-}
-
-/** Merge overlapping/adjacent [start,end] ranges (assumes small counts). */
-export function mergeRanges(ranges: Array<[number, number]>): Array<[number, number]> {
-  const sorted = [...ranges].sort((a, b) => a[0] - b[0]);
-  const merged: Array<[number, number]> = [];
-  for (const [start, end] of sorted) {
-    const last = merged[merged.length - 1];
-    if (last && start <= last[1] + 1) {
-      last[1] = Math.max(last[1], end);
-    } else {
-      merged.push([start, end]);
-    }
-  }
-  return merged;
-}
 
 export interface NearbyContextInput {
   repoDir: string;

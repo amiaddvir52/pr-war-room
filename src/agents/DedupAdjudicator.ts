@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Config } from "../config/schema.js";
 import type { Adjudicator } from "../findings/deduplicateFindings.js";
+import { extractJsonObjects } from "../util/extractJsonObjects.js";
 import { createModelClient } from "./modelClient.js";
 import { buildDedupSystemPrompt, buildDedupUserPrompt } from "./prompts/dedupPrompt.js";
 import type { ModelClient } from "./types.js";
@@ -26,33 +27,6 @@ const DEDUP_OUTPUT_JSON_SCHEMA: Record<string, unknown> = {
 };
 
 const DedupResponseSchema = z.object({ same_issue: z.boolean() });
-
-/**
- * Scan `text` for every brace-balanced `{…}` substring, in order of appearance.
- * A depth counter matches nested braces, so a well-formed object is captured
- * whole even when it is embedded in prose or a ```json fence (the fence body is
- * part of `text`). Substrings whose braces are unbalanced by string contents
- * simply fail to `JSON.parse` downstream and are ignored.
- */
-function extractJsonObjects(text: string): string[] {
-  const objects: string[] = [];
-  let depth = 0;
-  let start = -1;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (ch === "{") {
-      if (depth === 0) start = i;
-      depth++;
-    } else if (ch === "}" && depth > 0) {
-      depth--;
-      if (depth === 0 && start >= 0) {
-        objects.push(text.slice(start, i + 1));
-        start = -1;
-      }
-    }
-  }
-  return objects;
-}
 
 /**
  * Extract the model's `same_issue` verdict, defaulting to `false` (do NOT merge)

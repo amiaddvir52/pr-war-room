@@ -168,3 +168,179 @@ export const REVIEWER_OUTPUT_JSON_SCHEMA: Record<string, unknown> = {
     },
   },
 };
+
+/**
+ * Skeptic / evidence-validation schema (PRD §10.7 / Phase 8). For every cluster
+ * the skeptic tries to *disprove* the finding and reports whether it survives.
+ *
+ * The persisted record deliberately keeps three things separate so no field
+ * ever contradicts another:
+ *   - `SkepticVerdict`  — the RAW fields the skeptic model returns (its opinion).
+ *   - `EvidenceChecks`  — the deterministic checks (hard failures / soft
+ *                         warnings / boolean signals).
+ *   - `SkepticDecision` — the FINAL decision (keep/downgrade/drop) the phase
+ *                         actually acts on, plus why. The model verdict is
+ *                         advisory; the decision is authoritative.
+ */
+export const SUPPORT_LEVELS = ["strong", "medium", "weak", "unsupported"] as const;
+export const FALSE_POSITIVE_RISKS = ["low", "medium", "high"] as const;
+export const RECOMMENDED_ACTIONS = ["keep", "downgrade", "drop"] as const;
+
+export const SupportLevelSchema = z.enum(SUPPORT_LEVELS);
+export const FalsePositiveRiskSchema = z.enum(FALSE_POSITIVE_RISKS);
+export const RecommendedActionSchema = z.enum(RECOMMENDED_ACTIONS);
+
+export type SupportLevel = z.infer<typeof SupportLevelSchema>;
+export type FalsePositiveRisk = z.infer<typeof FalsePositiveRiskSchema>;
+export type RecommendedAction = z.infer<typeof RecommendedActionSchema>;
+
+/**
+ * Deterministic evidence-issue kinds.
+ *   - `file_not_in_changeset` is a HARD failure: the finding references a file
+ *     that is not part of the PR at all, so it is objectively out of scope and
+ *     may be dropped without model support.
+ *   - the rest are SOFT warnings: they downgrade/annotate a finding (weak
+ *     anchoring) but never drop it on their own — recall-first.
+ */
+export const EVIDENCE_ISSUE_CODES = [
+  "file_not_in_changeset", // hard
+  "partial_anchor", // soft: only one of line_start/line_end was set
+  "inverted_anchor", // soft: line_end < line_start
+  "line_outside_diff", // soft: lines neither in a hunk nor within the nearby window
+] as const;
+export const EvidenceIssueCodeSchema = z.enum(EVIDENCE_ISSUE_CODES);
+export type EvidenceIssueCode = z.infer<typeof EvidenceIssueCodeSchema>;
+
+export const EvidenceIssueSchema = z.object({
+  code: EvidenceIssueCodeSchema,
+  message: z.string(),
+});
+export type EvidenceIssue = z.infer<typeof EvidenceIssueSchema>;
+
+/**
+ * Boolean signals derived from the deterministic checks. `line_in_diff` /
+ * `line_near_diff` are `null` when they cannot be evaluated (no line anchor, no
+ * patch, or no parseable hunks) — a null is "unknown", never a failure.
+ */
+export const EvidenceSignalsSchema = z.object({
+  file_in_changeset: z.boolean(),
+  has_line_anchor: z.boolean(),
+  line_in_diff: z.boolean().nullable(),
+  line_near_diff: z.boolean().nullable(),
+});
+export type EvidenceSignals = z.infer<typeof EvidenceSignalsSchema>;
+
+/**
+ * Deterministic (no-LLM) evidence checks run against the review packet. Hard
+ * failures are objective, out-of-scope problems that may drop a finding without
+ * the model; soft warnings only downgrade/annotate. `notes` is the
+ * human-readable evidence trail (shown to the model and in the report).
+ */
+export const EvidenceChecksSchema = z.object({
+  hard_failures: z.array(EvidenceIssueSchema),
+  soft_warnings: z.array(EvidenceIssueSchema),
+  signals: EvidenceSignalsSchema,
+  notes: z.array(z.string()),
+});
+
+export type EvidenceChecks = z.infer<typeof EvidenceChecksSchema>;
+
+/** The skeptic model's raw verdict for one cluster (advisory input, not the decision). */
+export const SkepticVerdictSchema = z.object({
+  is_supported: z.boolean(),
+  support_level: SupportLevelSchema,
+  false_positive_risk: FalsePositiveRiskSchema,
+  reasoning_summary: z.string(),
+  recommended_action: RecommendedActionSchema,
+});
+
+export type SkepticVerdict = z.infer<typeof SkepticVerdictSchema>;
+
+/**
+ * The final, authoritative decision for a cluster. `action` is what feeds the
+ * Phase-9 judge (`drop` = excluded from candidates). `softened_from_model_action`
+ * records when the model's recommendation was softened for recall (e.g. a `drop`
+ * kept as `downgrade`), so the audit trail is explicit rather than contradictory.
+ */
+export const SkepticDecisionSchema = z.object({
+  action: RecommendedActionSchema,
+  reason: z.string(),
+  softened_from_model_action: RecommendedActionSchema.nullable(),
+});
+
+export type SkepticDecision = z.infer<typeof SkepticDecisionSchema>;
+
+/**
+ * Why the skeptic could not produce a model verdict for a cluster. Recorded (not
+ * swallowed) so a fallback-keep is auditable; `unexpected` marks a programming
+ * error that is surfaced, not silently treated as an infra hiccup.
+ */
+export const SKEPTIC_FAILURE_KINDS = [
+  "timeout",
+  "refusal",
+  "max_tokens",
+  "parse_error",
+  "backend_error",
+  "construction_error",
+  "unexpected",
+] as const;
+export const SkepticFailureKindSchema = z.enum(SKEPTIC_FAILURE_KINDS);
+export type SkepticFailureKind = z.infer<typeof SkepticFailureKindSchema>;
+
+export const SkepticFailureSchema = z.object({
+  kind: SkepticFailureKindSchema,
+  message: z.string(),
+});
+export type SkepticFailure = z.infer<typeof SkepticFailureSchema>;
+
+/**
+ * How the final decision was reached:
+ *   - `llm`           — the skeptic model answered; the decision reflects its
+ *                       (recall-softened) verdict.
+ *   - `deterministic` — decided by the evidence checks alone (a hard-failure
+ *                       drop, or the mock backend's checks-only path).
+ *   - `fallback`      — the skeptic could not run (see `failure`); the finding is
+ *                       kept pending review.
+ */
+export const SKEPTIC_SOURCES = ["llm", "deterministic", "fallback"] as const;
+export const SkepticSourceSchema = z.enum(SKEPTIC_SOURCES);
+export type SkepticSource = z.infer<typeof SkepticSourceSchema>;
+
+/** The per-cluster record written to `skeptic/skeptic_results.json`. */
+export const SkepticResultSchema = z.object({
+  cluster_id: z.string(),
+  source: SkepticSourceSchema,
+  checks: EvidenceChecksSchema,
+  // The raw model verdict, or null when no model ran (mock / construction /
+  // infra failure). Kept separate from `decision` so the two never contradict.
+  model_verdict: SkepticVerdictSchema.nullable(),
+  decision: SkepticDecisionSchema,
+  // Non-null only when the skeptic could not complete for this cluster.
+  failure: SkepticFailureSchema.nullable(),
+});
+
+export type SkepticResult = z.infer<typeof SkepticResultSchema>;
+
+/**
+ * Structured-output JSON Schema for the skeptic verdict. Same convention as
+ * `REVIEWER_OUTPUT_JSON_SCHEMA`: closed object, every property required, enums
+ * inlined; the value semantics are re-checked by `SkepticVerdictSchema` on parse.
+ */
+export const SKEPTIC_OUTPUT_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "is_supported",
+    "support_level",
+    "false_positive_risk",
+    "reasoning_summary",
+    "recommended_action",
+  ],
+  properties: {
+    is_supported: { type: "boolean" },
+    support_level: { type: "string", enum: [...SUPPORT_LEVELS] },
+    false_positive_risk: { type: "string", enum: [...FALSE_POSITIVE_RISKS] },
+    reasoning_summary: { type: "string" },
+    recommended_action: { type: "string", enum: [...RECOMMENDED_ACTIONS] },
+  },
+};

@@ -13,5 +13,6 @@ export type {
   ReviewConfig,
   ContextConfig,
   DedupConfig,
+  SkepticConfig,
   CiConfig,
 } from "./schema.js";

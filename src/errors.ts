@@ -1,3 +1,5 @@
+import type { SkepticFailureKind } from "./findings/schema.js";
+
 /**
  * Typed CLI errors. Each carries an `exitCode` so the top-level error boundary
  * in `cli/index.ts` can exit with a meaningful process code.
@@ -62,5 +64,22 @@ export class ReviewerTimeoutError extends ReviewerError {
   constructor(message: string) {
     super(message);
     this.name = "ReviewerTimeoutError";
+  }
+}
+
+/**
+ * A soft skeptic failure (refusal / truncation / backend error / unparseable
+ * verdict). A subclass of `ReviewerError` so existing `instanceof ReviewerError`
+ * handling still applies, but it carries a structured `kind` so `runSkeptic` can
+ * annotate the kept finding (recall-first) without matching on message text.
+ * `timeout` failures keep flowing through `ReviewerTimeoutError`.
+ */
+export class SkepticError extends ReviewerError {
+  readonly kind: SkepticFailureKind;
+
+  constructor(message: string, kind: SkepticFailureKind) {
+    super(message);
+    this.name = "SkepticError";
+    this.kind = kind;
   }
 }
