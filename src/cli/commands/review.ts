@@ -16,6 +16,8 @@ import type {
 } from "../../context/buildReviewPacket.js";
 import { runReviewers, isUsable } from "../../agents/runReviewers.js";
 import type { RunReviewers } from "../../agents/runReviewers.js";
+import { deduplicateFindings } from "../../findings/deduplicateFindings.js";
+import { createDedupAdjudicator } from "../../agents/DedupAdjudicator.js";
 
 /** Phase-3 workspace prep. Injected so tests avoid git/subprocess side effects. */
 export type PrepareWorkspaceFn = (input: PrepareWorkspaceInput) => Promise<WorkspaceResult>;
@@ -173,5 +175,23 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
         `see ${relative(paths.root, paths.raw.agentRuns)}`,
     );
   }
-  reporter.note("Dedupe, skeptic, judge and report generation arrive in later phases.");
+
+  // Phase 7 — deduplicate & cluster. Overlapping findings from the independent
+  // reviewers are merged into one cluster per underlying issue (singletons
+  // included), so the later skeptic/judge phases work on a single uniform unit.
+  // Deterministic heuristics by default; the optional LLM adjudicator (§10.6
+  // step 4) is only built when configured on.
+  const adjudicate = config.dedup.llm.enabled ? createDedupAdjudicator(config) : undefined;
+  const clusters = await deduplicateFindings(reviewResult.findings, config.dedup, adjudicate);
+  await writeJsonArtifact(paths.deduped.clusters, clusters);
+
+  const merged = reviewResult.findings.length - clusters.length;
+  reporter.blank();
+  reporter.success(
+    `${n} finding${n === 1 ? "" : "s"} deduplicated into ${clusters.length} cluster${clusters.length === 1 ? "" : "s"}` +
+      (merged > 0 ? ` (${merged} merged as duplicate${merged === 1 ? "" : "s"})` : "") +
+      ` — see ${relative(paths.root, paths.deduped.clusters)}`,
+  );
+
+  reporter.note("Skeptic, judge and report generation arrive in later phases.");
 }

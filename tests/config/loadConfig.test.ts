@@ -45,6 +45,22 @@ describe("mergeConfig", () => {
     expect(merged.verification.commands).toEqual(["pytest"]);
   });
 
+  it("applies the dedup defaults when no dedup override is given", () => {
+    const merged = mergeConfig(defaultConfig, {});
+    expect(merged.dedup).toEqual(defaultConfig.dedup);
+    expect(merged.dedup.llm.enabled).toBe(false);
+  });
+
+  it("deep-merges a partial dedup override, keeping sibling defaults", () => {
+    const merged = mergeConfig(defaultConfig, {
+      dedup: { mergeThreshold: 0.8, llm: { enabled: true } },
+    });
+    expect(merged.dedup.mergeThreshold).toBe(0.8);
+    expect(merged.dedup.candidateThreshold).toBe(defaultConfig.dedup.candidateThreshold);
+    expect(merged.dedup.llm.enabled).toBe(true);
+    expect(merged.dedup.llm.backend).toBe("claude"); // sibling default preserved
+  });
+
   it("overrides the judge and leaves the reviewer roster intact", () => {
     const merged = mergeConfig(defaultConfig, { models: { judge: "codex" } });
     expect(merged.models.judge).toBe("codex");
@@ -69,6 +85,8 @@ describe("mergeConfig", () => {
   it.each([
     { review: { maxFindings: -1 } },
     { review: { includeNiceToHave: "yes" } },
+    { dedup: { mergeThreshold: 2 } }, // must be within [0, 1]
+    { dedup: { llm: { enabled: "yes" } } }, // must be a boolean
     { reviews: {} }, // unknown top-level key (strict)
     { agents: { concurrency: 0 } }, // must be a positive int
     { agents: { minUsableReviewers: 0 } }, // must be a positive int

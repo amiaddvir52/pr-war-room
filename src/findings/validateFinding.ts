@@ -20,7 +20,8 @@ export interface PartitionResult {
   dropped: DroppedFinding[];
 }
 
-const SEVERITY_RANK: Record<FindingSeverity, number> = {
+/** Severity ordering shared with dedup/judge: higher number = more severe. */
+export const SEVERITY_RANK: Record<FindingSeverity, number> = {
   blocker: 4,
   high: 3,
   medium: 2,

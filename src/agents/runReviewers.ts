@@ -12,6 +12,7 @@ import { MockReviewer } from "./MockReviewer.js";
 import { Reviewer } from "./Reviewer.js";
 import { createModelClient } from "./modelClient.js";
 import type { ModelClient, RawAgentResult, ReviewerAgent } from "./types.js";
+import { mapWithConcurrency } from "../util/mapWithConcurrency.js";
 
 export interface RunReviewersInput {
   packet: ReviewPacket;
@@ -90,26 +91,6 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       },
     );
   });
-}
-
-/** Run `fn` over `items` with at most `limit` in flight; preserves order. */
-async function mapWithConcurrency<T, R>(
-  items: readonly T[],
-  limit: number,
-  fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const workerCount = Math.max(1, Math.min(limit, items.length));
-  const workers = Array.from({ length: workerCount }, async () => {
-    while (true) {
-      const i = next++;
-      if (i >= items.length) break;
-      results[i] = await fn(items[i]!, i);
-    }
-  });
-  await Promise.all(workers);
-  return results;
 }
 
 function classifyError(err: unknown): { status: "failed" | "timeout"; message: string } {

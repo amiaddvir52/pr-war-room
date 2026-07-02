@@ -43,6 +43,7 @@ export type {
   AgentSpec,
   ReviewerBackend,
   ReviewerAngle,
+  DedupConfig,
 } from "./config/types.js";
 
 export {
@@ -111,6 +112,7 @@ export { selectBanner } from "./ui/banner.js";
 export {
   FindingSchema,
   FindingCoreSchema,
+  FindingClusterSchema,
   ReviewerResponseSchema,
   REVIEWER_OUTPUT_JSON_SCHEMA,
   FINDING_CATEGORIES,
@@ -119,10 +121,11 @@ export {
 export type {
   Finding,
   FindingCore,
+  FindingCluster,
   FindingCategory,
   FindingSeverity,
 } from "./findings/schema.js";
-export { partitionFindings } from "./findings/validateFinding.js";
+export { partitionFindings, SEVERITY_RANK } from "./findings/validateFinding.js";
 export type { PartitionResult, DroppedFinding } from "./findings/validateFinding.js";
 export { normalizeFindings } from "./findings/normalizeFindings.js";
 
@@ -154,6 +157,17 @@ export type {
   ModelRequest,
   ModelResult,
 } from "./agents/types.js";
+
+// Phase 7 — deduplication & clustering
+export {
+  deduplicateFindings,
+  clusterFindings,
+  mergeCluster,
+  findingSimilarity,
+  textSimilarity,
+} from "./findings/deduplicateFindings.js";
+export type { Adjudicator } from "./findings/deduplicateFindings.js";
+export { createDedupAdjudicator } from "./agents/DedupAdjudicator.js";
 
 export {
   CliError,

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { runReview } from "../../src/cli/commands/review.js";
 import type { PrepareWorkspaceFn, BuildReviewPacketFn } from "../../src/cli/commands/review.js";
 import type { RunReviewers, RunReviewersInput } from "../../src/agents/runReviewers.js";
+import type { Finding } from "../../src/findings/schema.js";
 import { PrUrlError, GitHubError, ReviewerError } from "../../src/errors.js";
 import { CONFIG_FILENAME } from "../../src/config/loadConfig.js";
 import { silentReporter } from "../../src/ui/reporter.js";
@@ -241,6 +242,41 @@ describe("runReview (integration)", () => {
     expect(rv.calls[0]?.packet.schemaVersion).toBe(1);
     expect(rv.calls[0]?.config.agents.reviewers).toHaveLength(3);
     expect(rv.calls[0]?.config.agents.reviewers[0]?.backend).toBe("claude");
+  });
+
+  it("deduplicates the fan-out findings into finding_clusters.json (Phase 7)", async () => {
+    const base: Omit<Finding, "id" | "source_agent" | "raw_agent_output_ref"> = {
+      title: "user.profile may be undefined and crash rendering",
+      category: "correctness",
+      severity: "medium",
+      confidence: 0.7,
+      file: "src/x.ts",
+      line_start: 10,
+      line_end: 12,
+      claim: "user.profile may be undefined and crash rendering",
+      evidence: ["line 10 dereferences user.profile"],
+      suggested_fix: null,
+      suggested_test: null,
+      human_review_likelihood: 0.8,
+      needs_code_change: true,
+    };
+    const dupes: RunReviewers = async () => ({
+      findings: [
+        { ...base, id: "a-001", source_agent: "reviewer_a", raw_agent_output_ref: "raw/a.md" },
+        { ...base, id: "b-001", source_agent: "reviewer_b", raw_agent_output_ref: "raw/b.md", severity: "high" },
+      ],
+      agents: [],
+    });
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, runReviewers: dupes }));
+
+    const clusters = JSON.parse(
+      await readFile(join(dir, ".ai-review", "deduped", "finding_clusters.json"), "utf8"),
+    ) as Array<{ cluster_id: string; source_finding_ids: string[]; agreement: number; severity: string }>;
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0]?.cluster_id).toBe("cluster-001");
+    expect(clusters[0]?.source_finding_ids).toEqual(["a-001", "b-001"]);
+    expect(clusters[0]?.agreement).toBe(2);
+    expect(clusters[0]?.severity).toBe("high"); // max across the merged findings
   });
 
   it("propagates a ReviewerError raised by the reviewer fan-out", async () => {

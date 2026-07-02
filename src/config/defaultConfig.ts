@@ -45,4 +45,16 @@ export const defaultConfig: Config = {
     nearbyContextLines: 20,
     maxNearbyLinesPerFile: 400,
   },
+  // Phase 7 — deduplication. Heuristic clustering is always on; the LLM
+  // adjudicator is off by default so runs stay deterministic and call-free.
+  dedup: {
+    proximityLines: 10,
+    mergeThreshold: 0.6,
+    candidateThreshold: 0.4,
+    llm: {
+      enabled: false,
+      backend: "claude",
+      timeoutMs: 60_000,
+    },
+  },
 };
