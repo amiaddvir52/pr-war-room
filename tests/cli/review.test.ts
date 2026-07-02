@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { runReview } from "../../src/cli/commands/review.js";
 import type { PrepareWorkspaceFn, BuildReviewPacketFn } from "../../src/cli/commands/review.js";
 import type { RunReviewers, RunReviewersInput } from "../../src/agents/runReviewers.js";
+import type { RunSkeptic, RunSkepticInput } from "../../src/agents/runSkeptic.js";
+import type { SkepticResult } from "../../src/findings/schema.js";
 import type { Finding } from "../../src/findings/schema.js";
 import { PrUrlError, GitHubError, ReviewerError } from "../../src/errors.js";
 import { CONFIG_FILENAME } from "../../src/config/loadConfig.js";
@@ -152,6 +154,16 @@ function capturingReviewer(): { fn: RunReviewers; calls: RunReviewersInput[] } {
 }
 const fakeReviewer = (): RunReviewers => capturingReviewer().fn;
 
+function capturingSkeptic(results: SkepticResult[] = []): { fn: RunSkeptic; calls: RunSkepticInput[] } {
+  const calls: RunSkepticInput[] = [];
+  const fn: RunSkeptic = async (input) => {
+    calls.push(input);
+    return { results };
+  };
+  return { fn, calls };
+}
+const fakeSkeptic = (): RunSkeptic => capturingSkeptic().fn;
+
 /** Common injected fakes for the whole pipeline (Phases 1–5). */
 function fakes(extra: Partial<Parameters<typeof runReview>[1]> = {}) {
   return {
@@ -161,6 +173,7 @@ function fakes(extra: Partial<Parameters<typeof runReview>[1]> = {}) {
     prepareWorkspace: fakeWorkspace(),
     buildReviewPacket: fakeBuildPacket(),
     runReviewers: fakeReviewer(),
+    skeptic: fakeSkeptic(),
     ...extra,
   };
 }
@@ -279,6 +292,67 @@ describe("runReview (integration)", () => {
     expect(clusters[0]?.severity).toBe("high"); // max across the merged findings
   });
 
+  it("runs the skeptic on the deduped clusters and writes skeptic_results.json (Phase 8)", async () => {
+    const oneFinding: RunReviewers = async () => ({
+      findings: [
+        {
+          id: "a-001",
+          source_agent: "reviewer_a",
+          raw_agent_output_ref: "raw/a.md",
+          title: "possible crash",
+          category: "correctness",
+          severity: "high",
+          confidence: 0.7,
+          file: "src/x.ts",
+          line_start: 10,
+          line_end: 12,
+          claim: "possible crash",
+          evidence: ["line 10 dereferences user.profile"],
+          suggested_fix: null,
+          suggested_test: null,
+          human_review_likelihood: 0.8,
+          needs_code_change: true,
+        },
+      ],
+      agents: [],
+    });
+    const dropResult: SkepticResult = {
+      cluster_id: "cluster-001",
+      source: "deterministic",
+      checks: {
+        hard_failures: [{ code: "file_not_in_changeset", message: "not in changeset" }],
+        soft_warnings: [],
+        signals: { file_in_changeset: false, has_line_anchor: false, line_in_diff: null, line_near_diff: null },
+        notes: [],
+      },
+      model_verdict: null,
+      decision: { action: "drop", reason: "file is not in the changeset", softened_from_model_action: null },
+      failure: null,
+    };
+    const sk = capturingSkeptic([dropResult]);
+    await runReview(
+      "https://github.com/org/repo/pull/123",
+      fakes({ cwd: dir, runReviewers: oneFinding, skeptic: sk.fn }),
+    );
+
+    expect(sk.calls).toHaveLength(1);
+    expect(sk.calls[0]?.clusters).toHaveLength(1);
+    expect(sk.calls[0]?.clusters[0]?.cluster_id).toBe("cluster-001");
+    const written = JSON.parse(
+      await readFile(join(dir, ".ai-review", "skeptic", "skeptic_results.json"), "utf8"),
+    ) as SkepticResult[];
+    expect(written).toHaveLength(1);
+    expect(written[0]?.decision.action).toBe("drop");
+  });
+
+  it("skips the skeptic phase and writes no skeptic_results.json when disabled", async () => {
+    await writeFile(join(dir, CONFIG_FILENAME), JSON.stringify({ skeptic: { enabled: false } }), "utf8");
+    const sk = capturingSkeptic();
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, skeptic: sk.fn }));
+    expect(sk.calls).toHaveLength(0);
+    await expect(stat(join(dir, ".ai-review", "skeptic", "skeptic_results.json"))).rejects.toThrow();
+  });
+
   it("propagates a ReviewerError raised by the reviewer fan-out", async () => {
     const failing: RunReviewers = async () => {
       throw new ReviewerError("all reviewer agents failed");
@@ -291,7 +365,10 @@ describe("runReview (integration)", () => {
   it("runs the real mock reviewer end-to-end and writes normalized findings", async () => {
     await writeFile(
       join(dir, CONFIG_FILENAME),
-      JSON.stringify({ agents: { reviewers: [{ name: "mock", backend: "mock" }] } }),
+      JSON.stringify({
+        agents: { reviewers: [{ name: "mock", backend: "mock" }] },
+        skeptic: { backend: "mock" },
+      }),
       "utf8",
     );
     const buildPacketWithFile: BuildReviewPacketFn = async () => ({
@@ -323,12 +400,30 @@ describe("runReview (integration)", () => {
       cwd: dir,
     });
 
+    // The MockReviewer emits exactly two findings for one changed code file:
+    // an edge-case finding anchored at line 1, and a line-less "missing test
+    // coverage" finding (line 0/0).
     const findings = JSON.parse(
       await readFile(join(dir, ".ai-review", "normalized", "all_findings.json"), "utf8"),
     ) as Array<{ id: string; source_agent: string }>;
-    expect(findings.length).toBeGreaterThan(0);
+    expect(findings).toHaveLength(2);
     expect(findings[0]?.source_agent).toBe("mock");
     expect(findings[0]?.id).toMatch(/^mock-\d{3}$/);
+
+    const clusters = JSON.parse(
+      await readFile(join(dir, ".ai-review", "deduped", "finding_clusters.json"), "utf8"),
+    ) as Array<{ cluster_id: string }>;
+
+    // Phase 8 — the real skeptic ran with the mock backend (deterministic,
+    // offline). Finding #1's line (1) is covered by the fixture hunk `@@ -1 +1 @@`,
+    // and finding #2 is line-less, so neither is dropped: one result per cluster,
+    // all kept deterministically.
+    const skeptic = JSON.parse(
+      await readFile(join(dir, ".ai-review", "skeptic", "skeptic_results.json"), "utf8"),
+    ) as SkepticResult[];
+    expect(skeptic).toHaveLength(clusters.length);
+    expect(skeptic.every((r) => r.source === "deterministic")).toBe(true);
+    expect(skeptic.every((r) => r.decision.action === "keep")).toBe(true);
   });
 
   it("propagates a GitHubError raised during ingestion", async () => {

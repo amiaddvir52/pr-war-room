@@ -1,5 +1,6 @@
 import type { ReviewConfig, ReviewerAngle } from "../config/schema.js";
 import { ReviewerResponseSchema, REVIEWER_OUTPUT_JSON_SCHEMA } from "../findings/schema.js";
+import { extractJsonObjects } from "../util/extractJsonObjects.js";
 import { buildSystemPrompt, buildUserPrompt } from "./prompts/reviewerPrompt.js";
 import type { ModelClient, RawAgentResult, ReviewerAgent, ReviewerInput } from "./types.js";
 
@@ -7,49 +8,11 @@ import type { ModelClient, RawAgentResult, ReviewerAgent, ReviewerInput } from "
 const PARSE_FAILED = Symbol("parse-failed");
 
 /**
- * Collect every top-level, balanced `{…}` object in `text`, in source order.
- * The scan is string-aware: braces inside JSON strings (and escaped quotes) do
- * not affect the depth count, so a `"{"` in a value can't unbalance it. This is
- * the tolerant fallback for the CLI paths, where the model may wrap the JSON in
- * prose that itself contains braces — the previous first-`{`-to-last-`}` span
- * failed exactly that case.
- */
-function balancedObjects(text: string): string[] {
-  const objects: string[] = [];
-  let depth = 0;
-  let start = -1;
-  let inString = false;
-  let escaped = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') {
-      inString = true;
-    } else if (ch === "{") {
-      if (depth === 0) start = i;
-      depth++;
-    } else if (ch === "}" && depth > 0) {
-      depth--;
-      if (depth === 0 && start !== -1) {
-        objects.push(text.slice(start, i + 1));
-        start = -1;
-      }
-    }
-  }
-  return objects;
-}
-
-/**
  * Tolerant JSON extraction. The API (structured outputs) returns pure JSON, but
  * the CLI paths are only prompt-guided, so the model may wrap the object in
  * prose or ```json fences. Try the whole string, then a fenced block, then each
- * balanced top-level `{…}` object. Returns `PARSE_FAILED` when nothing parses.
+ * balanced top-level `{…}` object (via the shared string-aware extractor).
+ * Returns `PARSE_FAILED` when nothing parses.
  */
 function extractJson(text: string): unknown {
   const trimmed = text.trim();
@@ -58,7 +21,7 @@ function extractJson(text: string): unknown {
   const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence?.[1]) attempts.push(fence[1].trim());
 
-  attempts.push(...balancedObjects(trimmed));
+  attempts.push(...extractJsonObjects(trimmed));
 
   for (const candidate of attempts) {
     try {

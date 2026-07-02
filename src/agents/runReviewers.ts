@@ -13,6 +13,7 @@ import { Reviewer } from "./Reviewer.js";
 import { createModelClient } from "./modelClient.js";
 import type { ModelClient, RawAgentResult, ReviewerAgent } from "./types.js";
 import { mapWithConcurrency } from "../util/mapWithConcurrency.js";
+import { TIMEOUT_GRACE_MS, withTimeout } from "../util/withTimeout.js";
 
 export interface RunReviewersInput {
   packet: ReviewPacket;
@@ -65,33 +66,6 @@ export interface RunReviewersResult {
 }
 
 export type RunReviewers = (input: RunReviewersInput) => Promise<RunReviewersResult>;
-
-/** Grace added to a reviewer's own timeout before the orchestrator backstop fires. */
-const TIMEOUT_GRACE_MS = 250;
-
-/**
- * Reject with a `ReviewerTimeoutError` if `promise` doesn't settle within `ms`.
- * This is the backstop for the API backend (which has no internal timeout) and
- * any hung reviewer; the CLI backends also self-kill their subprocess at their
- * own timeout and throw the same typed error. Either way `classifyError` maps it
- * to a `timeout` status via `instanceof` — no message-text matching.
- */
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new ReviewerTimeoutError(`timed out after ${ms}ms`)), ms);
-    timer.unref?.();
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      },
-    );
-  });
-}
 
 function classifyError(err: unknown): { status: "failed" | "timeout"; message: string } {
   const message = err instanceof Error ? err.message : String(err);

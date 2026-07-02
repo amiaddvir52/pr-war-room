@@ -57,4 +57,13 @@ export const defaultConfig: Config = {
       timeoutMs: 60_000,
     },
   },
+  // Phase 8 — skeptic / evidence validation. ON by default (the precision gate);
+  // deterministic checks always run, the LLM skeptic runs on `claude` unless the
+  // backend is `mock`.
+  skeptic: {
+    enabled: true,
+    backend: "claude",
+    concurrency: 4,
+    timeoutMs: 60_000,
+  },
 };
