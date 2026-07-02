@@ -24,6 +24,19 @@ describe("resolveGitHubToken", () => {
     expect(r).toEqual({ token: "ght", source: "env:GH_TOKEN" });
   });
 
+  it("falls back to GITHUB_PERSONAL_ACCESS_TOKEN (the GitHub MCP var)", async () => {
+    const r = await resolveGitHubToken({ GITHUB_PERSONAL_ACCESS_TOKEN: "  ghp_mcp  " }, ghMissing);
+    expect(r).toEqual({ token: "ghp_mcp", source: "env:GITHUB_PERSONAL_ACCESS_TOKEN" });
+  });
+
+  it("prefers GITHUB_TOKEN over the MCP token var", async () => {
+    const r = await resolveGitHubToken(
+      { GITHUB_TOKEN: "gt", GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_mcp" },
+      ghMissing,
+    );
+    expect(r.source).toBe("env:GITHUB_TOKEN");
+  });
+
   it("falls back to `gh auth token` (trimming the trailing newline)", async () => {
     const r = await resolveGitHubToken({}, ghToken("ghp_abc\n"));
     expect(r).toEqual({ token: "ghp_abc", source: "gh" });

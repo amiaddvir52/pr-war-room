@@ -4,9 +4,12 @@ import { GitHubError } from "../errors.js";
 
 /**
  * Resolve a GitHub token, in order: `GITHUB_TOKEN`, then `GH_TOKEN` (honored by
- * the gh CLI itself), then `gh auth token`. `env` and the gh runner are injected
- * so tests never touch the real environment or spawn a subprocess. The token
- * value is never logged or persisted.
+ * the gh CLI itself), then `GITHUB_PERSONAL_ACCESS_TOKEN` (the variable the
+ * GitHub MCP server — `@modelcontextprotocol/server-github` — reads, so users
+ * who set up GitHub MCP get deterministic REST ingestion with no extra setup),
+ * then `gh auth token`. `env` and the gh runner are injected so tests never
+ * touch the real environment or spawn a subprocess. The token value is never
+ * logged or persisted.
  */
 
 const execFileAsync = promisify(execFile);
@@ -16,7 +19,11 @@ export type ExecFileRunner = (
   args: string[],
 ) => Promise<{ stdout: string; stderr: string }>;
 
-export type TokenSource = "env:GITHUB_TOKEN" | "env:GH_TOKEN" | "gh";
+export type TokenSource =
+  | "env:GITHUB_TOKEN"
+  | "env:GH_TOKEN"
+  | "env:GITHUB_PERSONAL_ACCESS_TOKEN"
+  | "gh";
 
 export interface ResolvedToken {
   token: string;
@@ -36,6 +43,9 @@ function pickEnvToken(env: NodeJS.ProcessEnv): ResolvedToken | null {
   if (githubToken) return { token: githubToken, source: "env:GITHUB_TOKEN" };
   const ghToken = env["GH_TOKEN"]?.trim();
   if (ghToken) return { token: ghToken, source: "env:GH_TOKEN" };
+  // The var the GitHub MCP server uses — reuse it so MCP users need no extra setup.
+  const patToken = env["GITHUB_PERSONAL_ACCESS_TOKEN"]?.trim();
+  if (patToken) return { token: patToken, source: "env:GITHUB_PERSONAL_ACCESS_TOKEN" };
   return null;
 }
 
@@ -57,7 +67,8 @@ function ghHint(err: unknown): string {
 
 function noAuthError(hint: string): GitHubError {
   return new GitHubError(
-    "GitHub authentication required. Set GITHUB_TOKEN, or authenticate the GitHub CLI.\n" +
+    "GitHub authentication required. Set GITHUB_TOKEN (or GITHUB_PERSONAL_ACCESS_TOKEN, " +
+      "the same token your GitHub MCP server uses), or authenticate the GitHub CLI.\n" +
       `  ${hint}\n` +
       "  Then re-run: pr-war-room review <pr-url>",
   );
