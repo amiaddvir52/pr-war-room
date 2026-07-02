@@ -250,14 +250,22 @@ export const runReviewers: RunReviewers = async (input) => {
     );
   }
 
-  const spin = reporter.spinner(
-    `running ${specs.length} reviewer${specs.length === 1 ? "" : "s"} in parallel…`,
-  );
+  // Show the roster up front, then stream each agent's result the moment it
+  // finishes (completion order) above a spinner that ticks a live done-count —
+  // so a slow reviewer doesn't leave the user staring at one opaque line.
+  const total = specs.length;
+  reporter.note(`reviewers queued: ${specs.map((s) => s.angle).join(", ")}`);
+  const spin = reporter.spinner(`reviewing (0/${total} done)…`);
+  let doneCount = 0;
   let outcomes: Array<{ run: AgentRun; findings: Finding[] }>;
   try {
-    outcomes = await mapWithConcurrency(specs, config.agents.concurrency, (spec) =>
-      runOne(spec, input),
-    );
+    outcomes = await mapWithConcurrency(specs, config.agents.concurrency, async (spec) => {
+      const outcome = await runOne(spec, input);
+      doneCount += 1;
+      spin.logAbove(() => reportAgent(reporter, outcome.run));
+      spin.update(`reviewing (${doneCount}/${total} done)…`);
+      return outcome;
+    });
   } finally {
     spin.stop();
   }
@@ -267,8 +275,6 @@ export const runReviewers: RunReviewers = async (input) => {
 
   await writeJsonArtifact(paths.normalized.allFindings, findings);
   await writeJsonArtifact(paths.raw.agentRuns, { schemaVersion: 1, agents });
-
-  for (const run of agents) reportAgent(reporter, run);
 
   const usable = agents.filter((a) => isUsable(a.status));
   const minUsable = config.agents.minUsableReviewers;

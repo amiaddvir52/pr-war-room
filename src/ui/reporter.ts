@@ -29,6 +29,15 @@ const SPINNER_INTERVAL_MS = 80;
  * output is piped/quiet/redirected it degrades to plain start + final lines.
  */
 export interface Spinner {
+  /** Replace the animated label (e.g. a live progress count). No-op off-TTY. */
+  update(label: string): void;
+  /**
+   * Print persistent line(s) above the live spinner. `print` should emit through
+   * the reporter (step/warn/…); the spinner line is wiped first and redrawn
+   * after, so the lines stay put and the spinner stays at the bottom. Off-TTY it
+   * simply runs `print` (no cursor management).
+   */
+  logAbove(print: () => void): void;
   succeed(label?: string): void;
   fail(label?: string): void;
   stop(): void;
@@ -122,7 +131,9 @@ export class Reporter {
    */
   spinner(label: string): Spinner {
     if (!this.canAnimate) {
-      // Non-TTY / quiet / injected sink: emit a start line, resolve via step().
+      // Non-TTY / quiet / injected sink: emit a start line, stream persistent
+      // lines via `logAbove`, resolve via step(). `update` is a no-op so we
+      // don't spam a redirected log with one line per progress tick.
       this.print(`  ${this.c.dim(SYM.step)} ${this.c.dim(label)}`);
       let done = false;
       const finish = (final: string | undefined, ok: boolean): void => {
@@ -131,6 +142,8 @@ export class Reporter {
         if (final !== undefined) this.step(final, ok);
       };
       return {
+        update: () => {},
+        logAbove: (print) => print(),
         succeed: (l) => finish(l, true),
         fail: (l) => finish(l, false),
         stop: () => finish(undefined, true),
@@ -138,10 +151,11 @@ export class Reporter {
     }
 
     let i = 0;
+    let current = label;
     const render = (): void => {
       const frame = this.c.cyan(SPINNER_FRAMES[i % SPINNER_FRAMES.length]!);
       // `\r` returns to line start; `\x1b[K` clears any leftover from a longer frame.
-      process.stdout.write(`\r  ${frame} ${label}\x1b[K`);
+      process.stdout.write(`\r  ${frame} ${current}\x1b[K`);
       i++;
     };
     render();
@@ -157,6 +171,23 @@ export class Reporter {
       if (final !== undefined) this.step(final, ok);
     };
     return {
+      update: (next) => {
+        if (done) return;
+        current = next;
+        render();
+      },
+      // Wipe the spinner line, run the caller's prints (each appends its own
+      // newline, so they land above), then redraw the spinner underneath. All
+      // synchronous, so no interval tick interleaves between wipe and redraw.
+      logAbove: (print) => {
+        if (done) {
+          print();
+          return;
+        }
+        process.stdout.write("\r\x1b[K");
+        print();
+        render();
+      },
       succeed: (l) => finish(l, true),
       fail: (l) => finish(l, false),
       stop: () => finish(undefined, true),

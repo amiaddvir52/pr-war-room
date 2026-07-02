@@ -78,5 +78,22 @@ describe("Reporter", () => {
       reporter.spinner("working…").succeed("done");
       expect(out).toHaveLength(0);
     });
+
+    it("streams logAbove lines in order and treats update as a no-op off-TTY", () => {
+      const { reporter, out } = capture();
+      const spin = reporter.spinner("reviewing (0/2 done)…");
+      spin.update("reviewing (1/2 done)…"); // no-op when not animating
+      spin.logAbove(() => reporter.step("agent_a (general) — 3 findings", true));
+      spin.logAbove(() => reporter.step("agent_b (test-gap) — failed", false));
+      spin.stop();
+      const text = out.join("\n");
+      expect(text).toContain("reviewing (0/2 done)"); // start line
+      expect(text).not.toContain("1/2"); // update is suppressed off-TTY
+      const a = text.indexOf("agent_a");
+      const b = text.indexOf("agent_b");
+      expect(a).toBeGreaterThan(-1);
+      expect(b).toBeGreaterThan(a); // streamed in completion order
+      expect(text).toContain("✗"); // the failed agent's mark
+    });
   });
 });
