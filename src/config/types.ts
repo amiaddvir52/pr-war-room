@@ -12,5 +12,6 @@ export type {
   VerificationConfig,
   ReviewConfig,
   ContextConfig,
+  DedupConfig,
   CiConfig,
 } from "./schema.js";

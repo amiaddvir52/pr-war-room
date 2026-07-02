@@ -65,6 +65,47 @@ export const FindingSchema = FindingCoreSchema.extend({
 export type Finding = z.infer<typeof FindingSchema>;
 
 /**
+ * A cluster of one or more findings that describe the same underlying issue
+ * (PRD §10.6 / Phase 7). Deduplication merges overlapping findings from the
+ * independent reviewers into clusters; every finding ends up in exactly one
+ * cluster, singletons included, so the skeptic (Phase 8) and judge (Phase 9)
+ * operate on a single uniform unit.
+ *
+ * `source_agents` and `agreement` go beyond the literal PRD schema: the Phase 9
+ * judge wants a "source agent agreement count", and it is free to compute here.
+ */
+export const FindingClusterSchema = z.object({
+  // Assigned after a deterministic sort: "cluster-001", "cluster-002", …
+  cluster_id: z.string(),
+  // The representative finding's title (deterministic — no LLM synthesis).
+  merged_title: z.string(),
+  // Ids of every source finding in the cluster (stable references back to
+  // `normalized/all_findings.json`).
+  source_finding_ids: z.array(z.string()).min(1),
+  // Distinct agents that contributed a finding to this cluster.
+  source_agents: z.array(z.string()).min(1),
+  // Number of distinct contributing agents (= source_agents.length). A strong
+  // signal for the judge: independent agreement raises human-review likelihood.
+  agreement: z.number().int().positive(),
+  category: FindingCategorySchema,
+  // Max severity across members (§10.6: at least as high as the highest source).
+  severity: FindingSeveritySchema,
+  confidence: z.number().min(0).max(1),
+  human_review_likelihood: z.number().min(0).max(1),
+  file: z.string().nullable(),
+  line_start: z.number().int().nonnegative(),
+  line_end: z.number().int().nonnegative(),
+  claim: z.string(),
+  // Union of member evidence (§10.6: keeps useful evidence from all sources).
+  evidence: z.array(z.string()).min(1),
+  suggested_fix: z.string().nullable(),
+  suggested_test: z.string().nullable(),
+  needs_code_change: z.boolean(),
+});
+
+export type FindingCluster = z.infer<typeof FindingClusterSchema>;
+
+/**
  * Structured-output root handed to the model. The Messages API requires an
  * object root with `additionalProperties: false`, so findings are wrapped in a
  * single `findings` property.

@@ -128,6 +128,32 @@ export const ContextConfigSchema = z.object({
 });
 
 /**
+ * Deduplication & clustering (Phase 7). The heuristic core is always on; the
+ * thresholds tune it, and `llm` scaffolds the PRD's optional "ask an LLM when
+ * heuristic confidence is unclear" adjudicator — OFF by default so runs stay
+ * deterministic and free of extra model calls.
+ */
+export const DedupConfigSchema = z
+  .object({
+    // Same-file findings whose line ranges are within this many lines are merge
+    // candidates (0 = require overlap).
+    proximityLines: z.number().int().nonnegative().default(10),
+    // Title+claim similarity at/above this auto-merges a candidate pair.
+    mergeThreshold: z.number().min(0).max(1).default(0.6),
+    // Similarity in [candidateThreshold, mergeThreshold) is the "gray zone" the
+    // LLM adjudicator (when enabled) decides; below it, never merge.
+    candidateThreshold: z.number().min(0).max(1).default(0.4),
+    llm: z
+      .object({
+        enabled: z.boolean().default(false),
+        backend: ReviewerBackendSchema.default("claude"),
+        timeoutMs: z.number().int().positive().default(60_000),
+      })
+      .default({}),
+  })
+  .default({});
+
+/**
  * CI options are pre-declared (optional/inert) so a config can already set them
  * and Phase 15 can activate them without breaking existing configs.
  */
@@ -145,6 +171,7 @@ export const ConfigSchema = z
     verification: VerificationConfigSchema,
     review: ReviewConfigSchema,
     context: ContextConfigSchema.default({}),
+    dedup: DedupConfigSchema,
     ci: CiConfigSchema.optional(),
   })
   // Reject unknown top-level keys so typos in a user config fail loudly.
@@ -158,5 +185,6 @@ export type ModelsConfig = z.infer<typeof ModelsConfigSchema>;
 export type VerificationConfig = z.infer<typeof VerificationConfigSchema>;
 export type ReviewConfig = z.infer<typeof ReviewConfigSchema>;
 export type ContextConfig = z.infer<typeof ContextConfigSchema>;
+export type DedupConfig = z.infer<typeof DedupConfigSchema>;
 export type CiConfig = z.infer<typeof CiConfigSchema>;
 export type Config = z.infer<typeof ConfigSchema>;

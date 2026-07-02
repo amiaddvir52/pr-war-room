@@ -16,6 +16,8 @@ import type {
 } from "../../context/buildReviewPacket.js";
 import { runReviewers, isUsable } from "../../agents/runReviewers.js";
 import type { RunReviewers } from "../../agents/runReviewers.js";
+import { deduplicateFindings } from "../../findings/deduplicateFindings.js";
+import { createDedupAdjudicator } from "../../agents/DedupAdjudicator.js";
 
 /** Phase-3 workspace prep. Injected so tests avoid git/subprocess side effects. */
 export type PrepareWorkspaceFn = (input: PrepareWorkspaceInput) => Promise<WorkspaceResult>;
@@ -61,6 +63,13 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   const pr = parsePrUrl(prUrl);
   const { config, source, path } = await loadConfig(cwd);
   const paths = getArtifactPaths(cwd);
+
+  // Render an artifact path as a Cmd-clickable link. The short label is relative
+  // to cwd (e.g. `.ai-review/normalized/all_findings.json`); the link target is
+  // always the absolute path. The Reporter picks the on-screen form per terminal
+  // (OSC 8 link, bare file:// URL, or plain text) — see Reporter.fileLink.
+  const artifactLink = (absolutePath: string): string =>
+    reporter.fileLink(relative(cwd, absolutePath), absolutePath);
 
   // Written first so the run is recorded even if ingestion later fails.
   const metadata = buildRunMetadata({
@@ -117,7 +126,7 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
     reporter.step("ran verification", workspace.verification.allPassed);
     if (!workspace.verification.allPassed) {
       reporter.warn(
-        `Some verification commands failed — see ${relative(paths.root, paths.verification.initial)}`,
+        `Some verification commands failed — see ${artifactLink(paths.verification.initial)}`,
       );
     }
   } else {
@@ -137,7 +146,7 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   reporter.step(`built review packet (${packet.changedFiles.length} files)`);
   if (packet.limits.truncated) {
     reporter.warn(
-      `Review packet trimmed to fit ${packet.limits.maxPacketBytes} bytes — see ${relative(paths.root, paths.context.packetJson)}`,
+      `Review packet trimmed to fit ${packet.limits.maxPacketBytes} bytes — see ${artifactLink(paths.context.packetJson)}`,
     );
   }
 
@@ -164,14 +173,32 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   const n = reviewResult.findings.length;
   reporter.success(
     `${n} finding${n === 1 ? "" : "s"} from ${usable}/${total} reviewer${total === 1 ? "" : "s"} — ` +
-      `see ${relative(paths.root, paths.normalized.allFindings)}`,
+      `see ${artifactLink(paths.normalized.allFindings)}`,
   );
   if (incomplete.length > 0) {
     reporter.warn(
       `${incomplete.length} reviewer${incomplete.length === 1 ? "" : "s"} did not complete ` +
         `(${incomplete.map((a) => `${a.name}: ${a.status}`).join(", ")}) — ` +
-        `see ${relative(paths.root, paths.raw.agentRuns)}`,
+        `see ${artifactLink(paths.raw.agentRuns)}`,
     );
   }
-  reporter.note("Dedupe, skeptic, judge and report generation arrive in later phases.");
+
+  // Phase 7 — deduplicate & cluster. Overlapping findings from the independent
+  // reviewers are merged into one cluster per underlying issue (singletons
+  // included), so the later skeptic/judge phases work on a single uniform unit.
+  // Deterministic heuristics by default; the optional LLM adjudicator (§10.6
+  // step 4) is only built when configured on.
+  const adjudicate = config.dedup.llm.enabled ? createDedupAdjudicator(config) : undefined;
+  const clusters = await deduplicateFindings(reviewResult.findings, config.dedup, adjudicate);
+  await writeJsonArtifact(paths.deduped.clusters, clusters);
+
+  const merged = reviewResult.findings.length - clusters.length;
+  reporter.blank();
+  reporter.success(
+    `${n} finding${n === 1 ? "" : "s"} deduplicated into ${clusters.length} cluster${clusters.length === 1 ? "" : "s"}` +
+      (merged > 0 ? ` (${merged} merged as duplicate${merged === 1 ? "" : "s"})` : "") +
+      ` — see ${artifactLink(paths.deduped.clusters)}`,
+  );
+
+  reporter.note("Skeptic, judge and report generation arrive in later phases.");
 }

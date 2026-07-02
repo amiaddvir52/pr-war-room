@@ -13,7 +13,7 @@ patches.
 
 ## Status
 
-This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–6** are
+This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–7** are
 implemented: the CLI skeleton, configuration system, PR-URL parsing, the
 `.ai-review/` artifact layout, **GitHub PR ingestion** (metadata, changed files,
 and diff), the **local workspace** (a shallow checkout of the PR head with
@@ -23,7 +23,9 @@ verification runs), the **review packet** — a structured `review_packet.json`
 repo conventions, and verification results — and the **multi-agent reviewer
 fan-out**: several independent review agents run in parallel against the packet,
 each with its own review angle, and their validated findings are merged into a
-single normalized set. Deduplication, the skeptic and judge steps, and report
+single normalized set — then **deduplicated**: overlapping findings from
+different agents are clustered into one issue each (singletons included), so
+later phases see a de-duplicated set. The skeptic and judge steps and report
 generation arrive next.
 
 GitHub access uses `GITHUB_TOKEN` if set, otherwise `GH_TOKEN`, otherwise
@@ -92,8 +94,9 @@ the PR head), `workspace/workspace_metadata.json`, and
 `context/review_packet.json` + `context/review_packet.md`; and the reviewer output —
 `raw/<agent>_review.md` (verbatim model output) and `raw/<agent>_findings.json` (that
 agent's validated findings) **per agent**, `raw/agent_runs.json` (which agents ran,
-failed, or timed out), and `normalized/all_findings.json` (every agent's findings merged
-and normalized — the input to later phases).
+failed, or timed out), `normalized/all_findings.json` (every agent's findings merged
+and normalized), and `deduped/finding_clusters.json` (those findings merged into one
+cluster per underlying issue — the input to later phases).
 
 Verification is **opt-in**: detection always runs, but commands only execute with
 `--verify` (or `verification.enabled: true`). This matters because running a PR's
@@ -136,6 +139,12 @@ the current directory, in which case it is deep-merged over the defaults
     "maxPacketBytes": 524288,
     "nearbyContextLines": 20,
     "maxNearbyLinesPerFile": 400
+  },
+  "dedup": {
+    "proximityLines": 10,
+    "mergeThreshold": 0.6,
+    "candidateThreshold": 0.4,
+    "llm": { "enabled": false, "backend": "claude", "timeoutMs": 60000 }
   }
 }
 ```
@@ -167,6 +176,15 @@ across all its hunks.
 `verification.commands` is empty by default so detection picks the commands; set
 it to override detection. `enabled` (or the `--verify` flag) turns execution on;
 `installDeps` installs dependencies first; `timeoutMs` bounds each command.
+
+`dedup` (Phase 7) controls how overlapping findings are clustered. The core is
+deterministic and always on: two findings are merge candidates only when they
+touch the **same file** within `proximityLines` lines, and their title+claim
+text similarity decides the rest — `mergeThreshold` auto-merges, anything below
+`candidateThreshold` is left separate. Similarity in the gray zone between the
+two is decided by an optional LLM adjudicator, which is **off by default**
+(`dedup.llm.enabled: false`) so runs stay deterministic and make no extra model
+calls; enabling it reuses the same `backend` clients as the reviewers.
 
 ## Development
 
