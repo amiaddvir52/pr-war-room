@@ -1,3 +1,4 @@
+import { pathToFileURL } from "node:url";
 import { createColors } from "picocolors";
 
 type Colors = ReturnType<typeof createColors>;
@@ -5,12 +6,52 @@ type Colors = ReturnType<typeof createColors>;
 export interface ReporterOptions {
   /** Force color on/off. Defaults to auto (stdout is a TTY and NO_COLOR unset). */
   color?: boolean;
+  /**
+   * Force how {@link Reporter.fileLink} renders links. Defaults to auto-detection
+   * from color + `TERM_PROGRAM` (see {@link resolveLinkStyle}). Mainly for tests.
+   */
+  linkStyle?: LinkStyle;
   /** Suppress everything except errors. */
   quiet?: boolean;
   /** Sink for normal output (one call per line). Defaults to stdout. */
   out?: (line: string) => void;
   /** Sink for errors. Defaults to stderr. */
   err?: (line: string) => void;
+}
+
+/**
+ * How a file link should be rendered so the user can open it:
+ *  - `"osc8"` — an OSC 8 hyperlink wrapping a short label. Clickable in iTerm2,
+ *    VS Code, WezTerm, kitty, Ghostty, and most modern emulators.
+ *  - `"url"` — a bare `file://` URL as visible text. Terminals that ignore OSC 8
+ *    but detect URLs (Apple Terminal, Warp) make it Cmd-clickable; the tradeoff
+ *    is a longer, absolute path on screen.
+ *  - `"path"` — plain text, no link. For piped / `NO_COLOR` / quiet output so
+ *    logs and pipelines stay clean.
+ */
+export type LinkStyle = "osc8" | "url" | "path";
+
+/** Terminals that ignore OSC 8 but do make a written-out `file://` URL clickable. */
+const OSC8_UNSUPPORTED = new Set(["Apple_Terminal", "WarpTerminal"]);
+
+/**
+ * Whether the current terminal renders OSC 8 hyperlinks as clickable links.
+ * Most modern emulators do, so we denylist the known exceptions (Apple Terminal
+ * has no support; Warp ignores OSC 8) rather than allowlist.
+ */
+export function supportsOsc8Hyperlinks(env: NodeJS.ProcessEnv = process.env): boolean {
+  const program = env["TERM_PROGRAM"];
+  return program === undefined || !OSC8_UNSUPPORTED.has(program);
+}
+
+/**
+ * Pick the link style for the current environment: none when output isn't a
+ * colored TTY (piped/quiet), an OSC 8 link when the terminal supports it, else a
+ * clickable `file://` URL for terminals (Apple Terminal, Warp) that only detect URLs.
+ */
+export function resolveLinkStyle(color: boolean, env: NodeJS.ProcessEnv = process.env): LinkStyle {
+  if (!color) return "path";
+  return supportsOsc8Hyperlinks(env) ? "osc8" : "url";
 }
 
 const SYM = {
@@ -68,11 +109,14 @@ export class Reporter {
   private readonly err: (line: string) => void;
   /** Only animate when we own a real TTY stdout and aren't quiet. */
   private readonly canAnimate: boolean;
+  /** How {@link fileLink} renders links, matched to the current terminal. */
+  private readonly linkStyle: LinkStyle;
 
   constructor(options: ReporterOptions = {}) {
     const color =
       options.color ?? (process.stdout.isTTY === true && !process.env["NO_COLOR"]);
     this.c = createColors(color);
+    this.linkStyle = options.linkStyle ?? resolveLinkStyle(color);
     this.quiet = options.quiet ?? false;
     this.out = options.out ?? ((line) => process.stdout.write(`${line}\n`));
     this.err = options.err ?? ((line) => process.stderr.write(`${line}\n`));
@@ -126,6 +170,24 @@ export class Reporter {
 
   note(message: string): void {
     this.print(`  ${this.c.dim(message)}`);
+  }
+
+  /**
+   * Render `text` as a link that opens the local file at `absolutePath` (a
+   * Cmd-click in most terminals). The form is chosen per terminal (see
+   * {@link LinkStyle}): an OSC 8 link where supported, a bare `file://` URL for
+   * Apple Terminal / Warp, or plain `text` for piped / non-color output.
+   *
+   * Returns a string — compose it into `success`/`warn`/`note` messages; it is
+   * not printed on its own.
+   */
+  fileLink(text: string, absolutePath: string): string {
+    if (this.linkStyle === "path") return text;
+    const url = pathToFileURL(absolutePath).href;
+    // A written-out file:// URL is Cmd-clickable in terminals that detect URLs.
+    if (this.linkStyle === "url") return url;
+    // OSC 8 ; params ; URI  BEL  <text>  OSC 8 ; ;  BEL  (BEL terminator is the most widely supported).
+    return `\x1b]8;;${url}\x07${text}\x1b]8;;\x07`;
   }
 
   success(message: string): void {

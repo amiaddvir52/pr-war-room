@@ -64,6 +64,13 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   const { config, source, path } = await loadConfig(cwd);
   const paths = getArtifactPaths(cwd);
 
+  // Render an artifact path as a Cmd-clickable link. The short label is relative
+  // to cwd (e.g. `.ai-review/normalized/all_findings.json`); the link target is
+  // always the absolute path. The Reporter picks the on-screen form per terminal
+  // (OSC 8 link, bare file:// URL, or plain text) — see Reporter.fileLink.
+  const artifactLink = (absolutePath: string): string =>
+    reporter.fileLink(relative(cwd, absolutePath), absolutePath);
+
   // Written first so the run is recorded even if ingestion later fails.
   const metadata = buildRunMetadata({
     command: "review",
@@ -119,7 +126,7 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
     reporter.step("ran verification", workspace.verification.allPassed);
     if (!workspace.verification.allPassed) {
       reporter.warn(
-        `Some verification commands failed — see ${relative(paths.root, paths.verification.initial)}`,
+        `Some verification commands failed — see ${artifactLink(paths.verification.initial)}`,
       );
     }
   } else {
@@ -139,7 +146,7 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   reporter.step(`built review packet (${packet.changedFiles.length} files)`);
   if (packet.limits.truncated) {
     reporter.warn(
-      `Review packet trimmed to fit ${packet.limits.maxPacketBytes} bytes — see ${relative(paths.root, paths.context.packetJson)}`,
+      `Review packet trimmed to fit ${packet.limits.maxPacketBytes} bytes — see ${artifactLink(paths.context.packetJson)}`,
     );
   }
 
@@ -166,13 +173,13 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   const n = reviewResult.findings.length;
   reporter.success(
     `${n} finding${n === 1 ? "" : "s"} from ${usable}/${total} reviewer${total === 1 ? "" : "s"} — ` +
-      `see ${relative(paths.root, paths.normalized.allFindings)}`,
+      `see ${artifactLink(paths.normalized.allFindings)}`,
   );
   if (incomplete.length > 0) {
     reporter.warn(
       `${incomplete.length} reviewer${incomplete.length === 1 ? "" : "s"} did not complete ` +
         `(${incomplete.map((a) => `${a.name}: ${a.status}`).join(", ")}) — ` +
-        `see ${relative(paths.root, paths.raw.agentRuns)}`,
+        `see ${artifactLink(paths.raw.agentRuns)}`,
     );
   }
 
@@ -190,7 +197,7 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   reporter.success(
     `${n} finding${n === 1 ? "" : "s"} deduplicated into ${clusters.length} cluster${clusters.length === 1 ? "" : "s"}` +
       (merged > 0 ? ` (${merged} merged as duplicate${merged === 1 ? "" : "s"})` : "") +
-      ` — see ${relative(paths.root, paths.deduped.clusters)}`,
+      ` — see ${artifactLink(paths.deduped.clusters)}`,
   );
 
   reporter.note("Skeptic, judge and report generation arrive in later phases.");
