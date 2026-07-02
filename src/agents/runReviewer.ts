@@ -27,6 +27,12 @@ export interface RunReviewerInput {
 export interface RunReviewerResult {
   agent: string;
   findings: Finding[];
+  /**
+   * How many of this reviewer's findings were dropped by `partitionFindings`.
+   * Reported to the user inline via the spinner suffix here in Phase 5; carried
+   * on the result for Phase 6, where the fan-out aggregates drop counts across
+   * reviewers into the run summary.
+   */
   droppedCount: number;
   /** Non-null when the reviewer produced no usable findings (soft failure). */
   parseError: string | null;

@@ -46,7 +46,13 @@ export interface ModelRequest {
 export interface ModelResult {
   /** The concatenated text content of the model's response. */
   text: string;
-  /** The response `stop_reason` (e.g. `"end_turn"`, `"refusal"`, `"max_tokens"`). */
+  /**
+   * The response `stop_reason`. The API path passes the SDK value through
+   * (`"end_turn"`, `"refusal"`, `"max_tokens"`, …); the CLI path normalizes its
+   * result envelope to the same vocabulary, adding `"error"` for a backend
+   * error (`is_error: true`). `ClaudeReviewer` special-cases `"refusal"`,
+   * `"max_tokens"`, and `"error"` as benign soft failures.
+   */
   stopReason: string | null;
 }
 

@@ -14,13 +14,18 @@ function fakeRunner(result: Partial<CliExecResult>): {
   const calls: Array<{ argv: string[]; stdin: string }> = [];
   const run: CliRunner = async (argv, stdin) => {
     calls.push({ argv, stdin });
-    return { code: 0, stdout: "", stderr: "", spawnError: null, ...result };
+    return { code: 0, stdout: "", stderr: "", spawnError: null, timedOut: false, ...result };
   };
   return { run, calls };
 }
 
 function envelope(result: string, isError = false): string {
   return JSON.stringify({ type: "result", subtype: "success", is_error: isError, result });
+}
+
+/** Build a result envelope with an explicit subtype (and matching is_error). */
+function envelopeWithSubtype(subtype: string, result = ""): string {
+  return JSON.stringify({ type: "result", subtype, is_error: subtype !== "success", result });
 }
 
 describe("createClaudeCliModelClient", () => {
@@ -61,10 +66,46 @@ describe("createClaudeCliModelClient", () => {
     await expect(createClaudeCliModelClient({ run }).complete(REQ)).rejects.toThrow(/Not logged in/);
   });
 
-  it("marks an is_error envelope with a non-terminal stop reason", async () => {
+  it("marks an is_error envelope with the `error` stop reason", async () => {
     const { run } = fakeRunner({ stdout: envelope("", true) });
     const result = await createClaudeCliModelClient({ run }).complete(REQ);
     expect(result.stopReason).toBe("error");
+  });
+
+  it("maps the `error_during_execution` subtype to the `error` stop reason", async () => {
+    const { run } = fakeRunner({ stdout: envelopeWithSubtype("error_during_execution", "boom") });
+    const result = await createClaudeCliModelClient({ run }).complete(REQ);
+    expect(result.stopReason).toBe("error");
+    expect(result.text).toBe("boom");
+  });
+
+  it("maps the `error_max_turns` subtype to `max_tokens` (truncated turn)", async () => {
+    const { run } = fakeRunner({ stdout: envelopeWithSubtype("error_max_turns") });
+    const result = await createClaudeCliModelClient({ run }).complete(REQ);
+    expect(result.stopReason).toBe("max_tokens");
+  });
+
+  it("honors an explicit model stop_reason in the envelope", async () => {
+    const stdout = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      stop_reason: "max_tokens",
+      result: '{"findings":[]}',
+    });
+    const { run } = fakeRunner({ stdout });
+    const result = await createClaudeCliModelClient({ run }).complete(REQ);
+    expect(result.stopReason).toBe("max_tokens");
+  });
+
+  it("throws a timeout-specific ReviewerError when the process is killed by the timeout", async () => {
+    // A timeout kill surfaces as code:null + timedOut:true (not a spawn error).
+    const { run } = fakeRunner({ code: null, timedOut: true });
+    const attempt = () => createClaudeCliModelClient({ run, timeoutMs: 1234 }).complete(REQ);
+    await expect(attempt()).rejects.toBeInstanceOf(ReviewerError);
+    await expect(attempt()).rejects.toThrow(/timed out after 1234ms/);
+    // And not the misleading install/login "exit code null" message.
+    await expect(attempt()).rejects.not.toThrow(/exit code null/);
   });
 
   it("falls back to raw stdout when output is not the expected envelope", async () => {

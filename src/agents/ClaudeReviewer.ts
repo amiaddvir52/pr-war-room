@@ -7,10 +7,49 @@ import type { ModelClient, RawAgentResult, ReviewerAgent, ReviewerInput } from "
 const PARSE_FAILED = Symbol("parse-failed");
 
 /**
+ * Collect every top-level, balanced `{…}` object in `text`, in source order.
+ * The scan is string-aware: braces inside JSON strings (and escaped quotes) do
+ * not affect the depth count, so a `"{"` in a value can't unbalance it. This is
+ * the tolerant fallback for the CLI path, where the model may wrap the JSON in
+ * prose that itself contains braces — the previous first-`{`-to-last-`}` span
+ * failed exactly that case.
+ */
+function balancedObjects(text: string): string[] {
+  const objects: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}" && depth > 0) {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        objects.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return objects;
+}
+
+/**
  * Tolerant JSON extraction. The API (structured outputs) returns pure JSON, but
  * the CLI path is only prompt-guided, so the model may wrap the object in prose
- * or ```json fences. Try the whole string, then a fenced block, then the
- * outermost `{…}` span. Returns `PARSE_FAILED` when nothing parses.
+ * or ```json fences. Try the whole string, then a fenced block, then each
+ * balanced top-level `{…}` object. Returns `PARSE_FAILED` when nothing parses.
  */
 function extractJson(text: string): unknown {
   const trimmed = text.trim();
@@ -19,9 +58,7 @@ function extractJson(text: string): unknown {
   const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence?.[1]) attempts.push(fence[1].trim());
 
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start !== -1 && end > start) attempts.push(trimmed.slice(start, end + 1));
+  attempts.push(...balancedObjects(trimmed));
 
   for (const candidate of attempts) {
     try {
@@ -31,6 +68,16 @@ function extractJson(text: string): unknown {
     }
   }
   return PARSE_FAILED;
+}
+
+/** First non-empty line of the backend's raw output, truncated for a one-line error. */
+function briefDetail(text: string): string {
+  const line = text
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  if (!line) return "";
+  return `: ${line.length > 200 ? `${line.slice(0, 200)}…` : line}`;
 }
 
 /**
@@ -64,6 +111,16 @@ export class ClaudeReviewer implements ReviewerAgent {
         rawText,
         findings: [],
         parseError: "model output was truncated (stop_reason: max_tokens)",
+      };
+    }
+    // A backend error (e.g. the CLI reported `is_error: true`). Surface it as a
+    // real error rather than letting the error text fall through to the JSON
+    // parser and be reported as the misleading "did not contain valid JSON".
+    if (result.stopReason === "error") {
+      return {
+        rawText,
+        findings: [],
+        parseError: `model backend reported an error (stop_reason: error)${briefDetail(rawText)}`,
       };
     }
 
