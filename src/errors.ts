@@ -51,3 +51,16 @@ export class ReviewerError extends CliError {
     this.name = "ReviewerError";
   }
 }
+
+/**
+ * A reviewer that exceeded its time budget. A subclass of `ReviewerError`, so it
+ * keeps exit code 6 and any existing `instanceof ReviewerError` handling, while
+ * letting the orchestrator classify timeouts structurally (via `instanceof`)
+ * instead of matching on the message text.
+ */
+export class ReviewerTimeoutError extends ReviewerError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReviewerTimeoutError";
+  }
+}

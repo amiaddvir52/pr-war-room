@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runReviewers } from "../../src/agents/runReviewers.js";
+import { runReviewers, isUsable } from "../../src/agents/runReviewers.js";
 import type { AgentRun } from "../../src/agents/runReviewers.js";
 import type { ModelClient } from "../../src/agents/types.js";
 import { getArtifactPaths } from "../../src/storage/artifactPaths.js";
@@ -10,7 +10,7 @@ import { defaultConfig } from "../../src/config/defaultConfig.js";
 import type { AgentSpec, Config } from "../../src/config/types.js";
 import { FindingSchema } from "../../src/findings/schema.js";
 import type { FindingCore } from "../../src/findings/schema.js";
-import { ReviewerError } from "../../src/errors.js";
+import { ReviewerError, ReviewerTimeoutError } from "../../src/errors.js";
 import { silentReporter } from "../../src/ui/reporter.js";
 import { makeReviewPacket } from "../fixtures/reviewPacket.js";
 
@@ -52,6 +52,24 @@ function findingClient(title: string): ModelClient {
   return {
     async complete() {
       return { text: JSON.stringify({ findings: [coreFinding(title)] }), stopReason: "end_turn" };
+    },
+  };
+}
+
+/** A client that returns valid structured output with zero findings (a clean empty result). */
+function emptyFindingsClient(): ModelClient {
+  return {
+    async complete() {
+      return { text: JSON.stringify({ findings: [] }), stopReason: "end_turn" };
+    },
+  };
+}
+
+/** A client whose output cannot be parsed into findings (a refusal / prose — unusable). */
+function unusableClient(): ModelClient {
+  return {
+    async complete() {
+      return { text: "sorry, I can't help with that", stopReason: "end_turn" };
     },
   };
 }
@@ -145,28 +163,27 @@ describe("runReviewers", () => {
     expect(result.findings[0]?.source_agent).toBe("good");
   });
 
-  it("records a soft parse failure as no_findings without aborting", async () => {
+  it("records unparseable output as unusable_output (not a clean empty result) without aborting", async () => {
     const reviewers: AgentSpec[] = [
       { name: "good", backend: "claude", angle: "general", enabled: true },
       { name: "garbled", backend: "claude", angle: "general", enabled: true },
     ];
-    const garbled: ModelClient = {
-      async complete() {
-        return { text: "sorry, no JSON here", stopReason: "end_turn" };
-      },
-    };
     const result = await runReviewers({
       packet,
       packetMarkdown: "# packet",
       config: configWith(reviewers),
       paths: getArtifactPaths(dir),
       reporter: silentReporter(),
-      makeClient: (spec) => (spec.name === "garbled" ? garbled : findingClient("ok")),
+      makeClient: (spec) => (spec.name === "garbled" ? unusableClient() : findingClient("ok")),
     });
     const garbledRun = byName(result.agents, "garbled");
-    expect(garbledRun.status).toBe("no_findings");
+    // A parse failure is unusable, NOT a clean `no_findings` (which is reserved
+    // for valid structured output that legitimately contained zero findings).
+    expect(garbledRun.status).toBe("unusable_output");
+    expect(isUsable(garbledRun.status)).toBe(false);
     expect(garbledRun.parseError).toMatch(/JSON/);
     expect(garbledRun.rawRef).toBe("raw/garbled_review.md");
+    // The run still succeeds on the strength of the one usable reviewer.
     expect(result.findings).toHaveLength(1); // only "good"
   });
 
@@ -194,14 +211,14 @@ describe("runReviewers", () => {
     expect(byName(result.agents, "fast").status).toBe("ok");
   });
 
-  it("classifies a CLI-style 'timed out' ReviewerError as a timeout", async () => {
+  it("classifies a CLI backend's ReviewerTimeoutError as a timeout (typed, not message-matched)", async () => {
     const reviewers: AgentSpec[] = [
       { name: "cli_slow", backend: "claude", angle: "general", enabled: true },
       { name: "fast", backend: "mock", angle: "general", enabled: true },
     ];
     const client: ModelClient = {
       async complete() {
-        throw new ReviewerError("The Claude CLI reviewer timed out after 300000ms");
+        throw new ReviewerTimeoutError("The Claude CLI reviewer timed out after 300000ms");
       },
     };
     const result = await runReviewers({
@@ -213,6 +230,29 @@ describe("runReviewers", () => {
       makeClient: () => client, // only called for the non-mock "cli_slow" agent
     });
     expect(byName(result.agents, "cli_slow").status).toBe("timeout");
+  });
+
+  it("classifies a hard failure that merely mentions 'timed out' as failed, not timeout", async () => {
+    // Guards against the old substring-matching classifier: a genuine hard error
+    // (e.g. a 504 whose message says "connection timed out") is NOT a timeout.
+    const reviewers: AgentSpec[] = [
+      { name: "misleading", backend: "claude", angle: "general", enabled: true },
+      { name: "fast", backend: "mock", angle: "general", enabled: true },
+    ];
+    const client: ModelClient = {
+      async complete() {
+        throw new ReviewerError("HTTP 504: upstream connection timed out");
+      },
+    };
+    const result = await runReviewers({
+      packet,
+      packetMarkdown: "# packet",
+      config: configWith(reviewers),
+      paths: getArtifactPaths(dir),
+      reporter: silentReporter(),
+      makeClient: () => client,
+    });
+    expect(byName(result.agents, "misleading").status).toBe("failed");
   });
 
   it("skips disabled agents", async () => {
@@ -268,5 +308,101 @@ describe("runReviewers", () => {
         reporter: silentReporter(),
       }),
     ).rejects.toThrow(/No reviewer agents are enabled/);
+  });
+});
+
+describe("runReviewers usable-output policy", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "prwr-usable-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const run = (
+    reviewers: AgentSpec[],
+    makeClient: (spec: AgentSpec) => ModelClient,
+    overrides: Partial<Config["agents"]> = {},
+  ) =>
+    runReviewers({
+      packet,
+      packetMarkdown: "# packet",
+      config: configWith(reviewers, overrides),
+      paths: getArtifactPaths(dir),
+      reporter: silentReporter(),
+      makeClient,
+    });
+
+  it("succeeds with zero findings when every reviewer returns a valid empty result", async () => {
+    const reviewers: AgentSpec[] = [
+      { name: "e1", backend: "claude", angle: "general", enabled: true },
+      { name: "e2", backend: "claude", angle: "general", enabled: true },
+    ];
+    const result = await run(reviewers, () => emptyFindingsClient());
+    expect(result.findings).toHaveLength(0);
+    expect(result.agents.every((a) => a.status === "no_findings")).toBe(true);
+    expect(result.agents.every((a) => isUsable(a.status))).toBe(true);
+  });
+
+  it("fails (non-zero) when every reviewer returns unusable output", async () => {
+    const paths = getArtifactPaths(dir);
+    const reviewers: AgentSpec[] = [
+      { name: "u1", backend: "claude", angle: "general", enabled: true },
+      { name: "u2", backend: "claude", angle: "general", enabled: true },
+    ];
+    await expect(
+      runReviewers({
+        packet,
+        packetMarkdown: "# packet",
+        config: configWith(reviewers),
+        paths,
+        reporter: silentReporter(),
+        makeClient: () => unusableClient(),
+      }),
+    ).rejects.toBeInstanceOf(ReviewerError);
+    // Recorded as unusable_output (not no_findings), so the failure is explicable.
+    const runs = JSON.parse(await readFile(paths.raw.agentRuns, "utf8"));
+    expect(runs.agents.every((a: AgentRun) => a.status === "unusable_output")).toBe(true);
+  });
+
+  it("is a partial success when at least the threshold of reviewers is usable", async () => {
+    const reviewers: AgentSpec[] = [
+      { name: "usable", backend: "claude", angle: "general", enabled: true },
+      { name: "broken", backend: "claude", angle: "general", enabled: true },
+    ];
+    const result = await run(reviewers, (spec) =>
+      spec.name === "broken" ? unusableClient() : findingClient("real"),
+    );
+    expect(byName(result.agents, "usable").status).toBe("ok");
+    expect(byName(result.agents, "broken").status).toBe("unusable_output");
+    expect(result.findings).toHaveLength(1);
+  });
+
+  it("succeeds when reviewers mix a valid-empty result with valid findings", async () => {
+    const reviewers: AgentSpec[] = [
+      { name: "empty", backend: "claude", angle: "general", enabled: true },
+      { name: "finder", backend: "claude", angle: "general", enabled: true },
+    ];
+    const result = await run(reviewers, (spec) =>
+      spec.name === "empty" ? emptyFindingsClient() : findingClient("real"),
+    );
+    expect(byName(result.agents, "empty").status).toBe("no_findings");
+    expect(byName(result.agents, "finder").status).toBe("ok");
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.source_agent).toBe("finder");
+  });
+
+  it("honors minUsableReviewers as a threshold above 1", async () => {
+    const reviewers: AgentSpec[] = [
+      { name: "usable", backend: "claude", angle: "general", enabled: true },
+      { name: "broken", backend: "claude", angle: "general", enabled: true },
+    ];
+    // Only one reviewer is usable, but the config requires two.
+    await expect(
+      run(reviewers, (spec) => (spec.name === "broken" ? unusableClient() : findingClient("real")), {
+        minUsableReviewers: 2,
+      }),
+    ).rejects.toThrow(/Only 1 of 2 reviewer agents produced usable output/);
   });
 });

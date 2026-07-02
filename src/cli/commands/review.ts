@@ -14,7 +14,7 @@ import type {
   BuildReviewPacketInput,
   BuildReviewPacketResult,
 } from "../../context/buildReviewPacket.js";
-import { runReviewers } from "../../agents/runReviewers.js";
+import { runReviewers, isUsable } from "../../agents/runReviewers.js";
 import type { RunReviewers } from "../../agents/runReviewers.js";
 
 /** Phase-3 workspace prep. Injected so tests avoid git/subprocess side effects. */
@@ -153,18 +153,17 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
     reporter,
   });
 
+  // We only reach here when the run met `agents.minUsableReviewers` (otherwise
+  // runReviewers threw). `usable` reviewers returned valid output; the rest
+  // (unusable output / failed / timed out) are reported as a caveat, not success.
   const total = reviewResult.agents.length;
-  const completed = reviewResult.agents.filter(
-    (a) => a.status === "ok" || a.status === "no_findings",
-  ).length;
-  const incomplete = reviewResult.agents.filter(
-    (a) => a.status === "failed" || a.status === "timeout",
-  );
+  const usable = reviewResult.agents.filter((a) => isUsable(a.status)).length;
+  const incomplete = reviewResult.agents.filter((a) => !isUsable(a.status));
 
   reporter.blank();
   const n = reviewResult.findings.length;
   reporter.success(
-    `${n} finding${n === 1 ? "" : "s"} from ${completed}/${total} reviewer${total === 1 ? "" : "s"} — ` +
+    `${n} finding${n === 1 ? "" : "s"} from ${usable}/${total} reviewer${total === 1 ? "" : "s"} — ` +
       `see ${relative(paths.root, paths.normalized.allFindings)}`,
   );
   if (incomplete.length > 0) {

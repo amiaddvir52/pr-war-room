@@ -116,7 +116,8 @@ the current directory, in which case it is deep-merged over the defaults
       { "name": "claude_correctness_reviewer", "backend": "claude", "angle": "correctness" }
     ],
     "concurrency": 4,
-    "timeoutMs": 300000
+    "timeoutMs": 300000,
+    "minUsableReviewers": 1
   },
   "models": {
     "judge": "claude"
@@ -141,11 +142,21 @@ the current directory, in which case it is deep-merged over the defaults
 
 `agents.reviewers` is the parallel reviewer roster (the array **replaces** the
 default when set). Each entry needs a filesystem-safe `name` (used for its
-`raw/<name>_*` artifacts and finding ids), a `backend`, and an `angle`; `enabled`
-(default `true`) and a per-agent `timeoutMs` override are optional.
-`agents.concurrency` caps how many run at once and `agents.timeoutMs` is the
-default per-agent timeout. Add a `{ "backend": "codex", … }` entry to bring in
-the opt-in cross-model reviewer.
+`raw/<name>_*` artifacts and finding ids, so names must be unique — compared
+case-insensitively), a `backend`, and an `angle`; `enabled` (default `true`) and
+a per-agent `timeoutMs` override are optional. `agents.concurrency` caps how many
+run at once and `agents.timeoutMs` is the default per-agent timeout. Add a
+`{ "backend": "codex", … }` entry to bring in the opt-in cross-model reviewer.
+
+`agents.minUsableReviewers` (default `1`) is the success threshold: the review
+succeeds only if at least this many reviewers return **usable** output (findings,
+or a valid empty result). A reviewer that refuses, times out, or emits
+unparseable output is *not* usable — a run where fewer than the threshold produce
+usable output exits non-zero rather than reporting a misleading clean review.
+
+Stale pre-Phase-6 keys (`models.primaryReviewer` / `models.secondaryReviewer`)
+are rejected with an error pointing here, so an upgraded config fails loudly
+instead of silently switching backends.
 
 `context.maxPacketBytes` soft-caps the review packet (largest patches are trimmed
 with a warning if exceeded); `context.nearbyContextLines` sets how much

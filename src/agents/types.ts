@@ -20,9 +20,10 @@ export interface RawAgentResult {
   /** Parsed, schema-valid core findings (empty when parsing failed). */
   findings: FindingCore[];
   /**
-   * Non-null when the model produced no usable findings for a benign reason
-   * (refusal, truncation, or output that didn't match the schema). This is a
-   * soft failure — the run continues with zero findings.
+   * Non-null when the model produced no usable output (refusal, truncation, or
+   * output that didn't match the schema). The reviewer does not throw for this;
+   * the orchestrator records it as `unusable_output` (distinct from a valid
+   * empty `no_findings`) and it counts against the usable-reviewer threshold.
    */
   parseError: string | null;
 }

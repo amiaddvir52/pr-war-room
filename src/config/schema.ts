@@ -42,20 +42,59 @@ export const AgentSpecSchema = z.object({
   timeoutMs: z.number().int().positive().optional(),
 });
 
-export const AgentsConfigSchema = z.object({
-  // The reviewer roster. Runs in parallel; disabled entries are skipped.
-  reviewers: z.array(AgentSpecSchema).default([]),
-  // Max reviewers running at once (each may spawn a subprocess / model call).
-  concurrency: z.number().int().positive().default(4),
-  // Default per-agent timeout in ms (a hung reviewer is recorded, not fatal).
-  timeoutMs: z.number().int().positive().default(300_000),
-});
+export const AgentsConfigSchema = z
+  .object({
+    // The reviewer roster. Runs in parallel; disabled entries are skipped.
+    reviewers: z.array(AgentSpecSchema).default([]),
+    // Max reviewers running at once (each may spawn a subprocess / model call).
+    concurrency: z.number().int().positive().default(4),
+    // Default per-agent timeout in ms (a hung reviewer is recorded, not fatal).
+    timeoutMs: z.number().int().positive().default(300_000),
+    // The review succeeds only when at least this many reviewers produce *usable*
+    // output (findings, or a valid empty result). If fewer do — e.g. every
+    // reviewer refused, timed out, or emitted unparseable output — the run fails
+    // (non-zero exit) instead of reporting a misleading clean review.
+    minUsableReviewers: z.number().int().positive().default(1),
+  })
+  .superRefine((agents, ctx) => {
+    // `name` is the stem of each agent's `raw/<name>_*` artifacts and the prefix
+    // of its finding ids, so names must be unique. Compare case-insensitively:
+    // case-only-distinct names (`Reviewer` vs `reviewer`) collide on
+    // case-insensitive filesystems (macOS, Windows), silently clobbering one
+    // agent's artifacts and minting colliding finding ids.
+    const seen = new Map<string, string>();
+    agents.reviewers.forEach((reviewer, index) => {
+      const key = reviewer.name.toLowerCase();
+      const prior = seen.get(key);
+      if (prior !== undefined) {
+        const caseNote = prior === reviewer.name ? "" : ` (case-insensitively collides with "${prior}")`;
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["reviewers", index, "name"],
+          message:
+            `duplicate reviewer name "${reviewer.name}"${caseNote} — names must be unique; ` +
+            "each is the stem of its `raw/<name>_*` artifacts and finding ids",
+        });
+      } else {
+        seen.set(key, reviewer.name);
+      }
+    });
+  });
 
-export const ModelsConfigSchema = z.object({
-  // The reviewer roster moved to `agents.reviewers` (Phase 6). `judge` stays a
-  // free string here for the Phase 9 LLM-as-a-judge step.
-  judge: z.string(),
-});
+export const ModelsConfigSchema = z
+  .object({
+    // The reviewer roster moved to `agents.reviewers` (Phase 6). `judge` stays a
+    // free string here for the Phase 9 LLM-as-a-judge step.
+    judge: z.string(),
+  })
+  // Reject stale keys loudly. Pre-Phase-6 configs set `models.primaryReviewer` /
+  // `models.secondaryReviewer`; silently stripping them would swap a user's
+  // reviewer backend without warning, so fail with a pointer to the new home.
+  .strict(
+    "unknown key in `models` — the reviewer roster moved to `agents.reviewers` in Phase 6. " +
+      "Remove `primaryReviewer` / `secondaryReviewer` and configure reviewers under " +
+      "`agents.reviewers` instead.",
+  );
 
 export const VerificationConfigSchema = z.object({
   // When non-empty, these run instead of the auto-detected commands (Phase 3).

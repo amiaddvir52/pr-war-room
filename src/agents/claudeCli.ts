@@ -1,4 +1,4 @@
-import { ReviewerError } from "../errors.js";
+import { ReviewerError, ReviewerTimeoutError } from "../errors.js";
 import { spawnCliRunner } from "./cliRunner.js";
 import type { CliRunner } from "./cliRunner.js";
 import type { ModelClient, ModelRequest, ModelResult } from "./types.js";
@@ -126,7 +126,7 @@ export function createClaudeCliModelClient(options: ClaudeCliOptions = {}): Mode
       // A timeout kill lands here as a null exit code — surface it as a timeout,
       // not the install/login-oriented "exit code null" setup error.
       if (res.timedOut) {
-        throw new ReviewerError(timeoutHelp(timeoutMs));
+        throw new ReviewerTimeoutError(timeoutHelp(timeoutMs));
       }
       if (res.spawnError !== null) {
         const detail = /ENOENT/.test(res.spawnError)

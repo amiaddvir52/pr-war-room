@@ -127,7 +127,7 @@ export type { PartitionResult, DroppedFinding } from "./findings/validateFinding
 export { normalizeFindings } from "./findings/normalizeFindings.js";
 
 // Phase 6 — multi-agent reviewer fan-out
-export { runReviewers } from "./agents/runReviewers.js";
+export { runReviewers, isUsable } from "./agents/runReviewers.js";
 export type {
   RunReviewers,
   RunReviewersInput,
@@ -162,4 +162,5 @@ export {
   GitHubError,
   WorkspaceError,
   ReviewerError,
+  ReviewerTimeoutError,
 } from "./errors.js";

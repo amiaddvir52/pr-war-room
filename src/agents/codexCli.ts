@@ -1,4 +1,4 @@
-import { ReviewerError } from "../errors.js";
+import { ReviewerError, ReviewerTimeoutError } from "../errors.js";
 import { spawnCliRunner } from "./cliRunner.js";
 import type { CliRunner } from "./cliRunner.js";
 import type { ModelClient, ModelRequest, ModelResult } from "./types.js";
@@ -77,7 +77,7 @@ export function createCodexCliModelClient(options: CodexCliOptions = {}): ModelC
       const res = await run(argv, prompt);
 
       if (res.timedOut) {
-        throw new ReviewerError(timeoutHelp(timeoutMs));
+        throw new ReviewerTimeoutError(timeoutHelp(timeoutMs));
       }
       if (res.spawnError !== null) {
         const detail = /ENOENT/.test(res.spawnError)

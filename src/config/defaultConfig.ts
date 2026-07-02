@@ -22,6 +22,7 @@ export const defaultConfig: Config = {
     ],
     concurrency: 4,
     timeoutMs: 300_000,
+    minUsableReviewers: 1,
   },
   models: {
     judge: "claude",

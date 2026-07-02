@@ -1,7 +1,7 @@
 import { relative } from "node:path";
 import type { AgentSpec, Config, ReviewConfig } from "../config/types.js";
 import type { ReviewPacket } from "../context/types.js";
-import { ReviewerError } from "../errors.js";
+import { ReviewerError, ReviewerTimeoutError } from "../errors.js";
 import type { Finding } from "../findings/schema.js";
 import { normalizeFindings } from "../findings/normalizeFindings.js";
 import { partitionFindings } from "../findings/validateFinding.js";
@@ -26,8 +26,19 @@ export interface RunReviewersInput {
   makeClient?: (spec: AgentSpec) => ModelClient;
 }
 
-/** How a single reviewer's run ended. */
-export type AgentStatus = "ok" | "no_findings" | "failed" | "timeout";
+/**
+ * How a single reviewer's run ended. The first two are *usable* — the reviewer
+ * returned valid structured output (`ok` with findings, `no_findings` with a
+ * valid empty result). The rest produced nothing usable: `unusable_output` is a
+ * refusal / truncation / unparseable or schema-invalid response, `failed` is a
+ * hard error, `timeout` is exceeding the time budget.
+ */
+export type AgentStatus = "ok" | "no_findings" | "unusable_output" | "failed" | "timeout";
+
+/** The usable outcomes: the reviewer returned valid structured output. */
+export function isUsable(status: AgentStatus): boolean {
+  return status === "ok" || status === "no_findings";
+}
 
 /** Per-agent execution record (written to `raw/agent_runs.json`). */
 export interface AgentRun {
@@ -38,7 +49,7 @@ export interface AgentRun {
   durationMs: number;
   findingCount: number;
   droppedCount: number;
-  /** Benign soft failure (refusal / truncation / unparseable output). */
+  /** Set for `unusable_output`: the refusal / truncation / parse-failure detail. */
   parseError: string | null;
   /** Hard failure message (missing credentials, CLI not found, timeout, …). */
   error: string | null;
@@ -57,18 +68,16 @@ export type RunReviewers = (input: RunReviewersInput) => Promise<RunReviewersRes
 /** Grace added to a reviewer's own timeout before the orchestrator backstop fires. */
 const TIMEOUT_GRACE_MS = 250;
 
-/** Distinguishes an orchestrator-level timeout from other rejections. */
-class TimeoutError extends Error {}
-
 /**
- * Reject with a `TimeoutError` if `promise` doesn't settle within `ms`. This is
- * the backstop for the API backend (which has no internal timeout) and any hung
- * reviewer; the CLI backends also self-kill their subprocess at their own
- * timeout. Either way the caught error is classified as a timeout.
+ * Reject with a `ReviewerTimeoutError` if `promise` doesn't settle within `ms`.
+ * This is the backstop for the API backend (which has no internal timeout) and
+ * any hung reviewer; the CLI backends also self-kill their subprocess at their
+ * own timeout and throw the same typed error. Either way `classifyError` maps it
+ * to a `timeout` status via `instanceof` — no message-text matching.
  */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new TimeoutError(`timed out after ${ms}ms`)), ms);
+    const timer = setTimeout(() => reject(new ReviewerTimeoutError(`timed out after ${ms}ms`)), ms);
     timer.unref?.();
     promise.then(
       (value) => {
@@ -105,10 +114,10 @@ async function mapWithConcurrency<T, R>(
 
 function classifyError(err: unknown): { status: "failed" | "timeout"; message: string } {
   const message = err instanceof Error ? err.message : String(err);
-  // CLI backends surface their own timeout as a ReviewerError whose message says
-  // "timed out"; the orchestrator backstop throws a TimeoutError. Treat both as
-  // a timeout so the status is consistent regardless of which fired first.
-  if (err instanceof TimeoutError || /timed out/i.test(message)) {
+  // Both the CLI backends (subprocess self-kill) and the orchestrator backstop
+  // throw a `ReviewerTimeoutError`, so a single `instanceof` check classifies a
+  // timeout regardless of which fired first — no fragile message matching.
+  if (err instanceof ReviewerTimeoutError) {
     return { status: "timeout", message };
   }
   return { status: "failed", message };
@@ -172,10 +181,16 @@ async function runOne(
   await writeJsonArtifact(paths.raw.findingsJson(spec.name), valid);
   const findings = normalizeFindings(valid, { agent: spec.name, rawRef });
 
+  // A parse error (refusal / truncation / non-JSON / schema-invalid) is *not* a
+  // clean empty review — it is unusable. `no_findings` is reserved for valid
+  // structured output that legitimately contained zero findings.
+  const status: AgentStatus =
+    result.parseError !== null ? "unusable_output" : findings.length > 0 ? "ok" : "no_findings";
+
   return {
     run: {
       ...base,
-      status: result.parseError !== null ? "no_findings" : "ok",
+      status,
       durationMs: Date.now() - start,
       findingCount: findings.length,
       droppedCount: dropped.length,
@@ -198,7 +213,11 @@ function reportAgent(reporter: Reporter, run: AgentRun): void {
       );
       break;
     case "no_findings":
-      reporter.step(`${label} — no usable findings`, false);
+      // Valid output, legitimately empty — a success, not a failure.
+      reporter.step(`${label} — no findings${dropped}`, true);
+      break;
+    case "unusable_output":
+      reporter.step(`${label} — unusable output`, false);
       if (run.parseError) reporter.warn(`${run.name}: ${run.parseError}`);
       break;
     case "timeout":
@@ -215,9 +234,11 @@ function reportAgent(reporter: Reporter, run: AgentRun): void {
  * Phase 6 fan-out. Build the enabled reviewer roster from `agents.reviewers`,
  * run them in parallel (bounded by `agents.concurrency`) each under a per-agent
  * timeout, and merge every agent's normalized findings into
- * `normalized/all_findings.json`. One agent failing, timing out, or producing no
- * usable output never aborts the run — it is recorded in `raw/agent_runs.json`.
- * Only if *every* agent fails do we throw (so the CLI exits non-zero).
+ * `normalized/all_findings.json`. One agent failing, timing out, or producing
+ * unusable output never aborts the run — it is recorded in `raw/agent_runs.json`.
+ * We throw (so the CLI exits non-zero) only when fewer than
+ * `agents.minUsableReviewers` produced *usable* output, so a run where every
+ * reviewer refused or emitted garbage is a failure, not a misleading clean review.
  */
 export const runReviewers: RunReviewers = async (input) => {
   const { config, paths, reporter } = input;
@@ -249,12 +270,19 @@ export const runReviewers: RunReviewers = async (input) => {
 
   for (const run of agents) reportAgent(reporter, run);
 
-  const completed = agents.filter((a) => a.status === "ok" || a.status === "no_findings");
-  if (completed.length === 0) {
-    const firstError = agents.find((a) => a.error !== null)?.error ?? "unknown error";
+  const usable = agents.filter((a) => isUsable(a.status));
+  const minUsable = config.agents.minUsableReviewers;
+  if (usable.length < minUsable) {
+    // Prefer a hard error to explain the shortfall; otherwise surface the first
+    // unusable-output detail (all agents ran but none returned valid findings).
+    const firstProblem =
+      agents.find((a) => a.error !== null)?.error ??
+      agents.find((a) => a.parseError !== null)?.parseError ??
+      "unknown error";
     throw new ReviewerError(
-      `All ${agents.length} reviewer agents failed. See ` +
-        `${relative(paths.root, paths.raw.agentRuns)} for details. First error: ${firstLine(firstError)}`,
+      `Only ${usable.length} of ${agents.length} reviewer agents produced usable output ` +
+        `(need at least ${minUsable}). See ${relative(paths.root, paths.raw.agentRuns)} for ` +
+        `details. First problem: ${firstLine(firstProblem)}`,
     );
   }
 
