@@ -79,4 +79,37 @@ describe("Reporter", () => {
       expect(out).toHaveLength(0);
     });
   });
+
+  describe("board (non-TTY path)", () => {
+    it("prints each row once when it resolves, in completion order, skipping queued/running", () => {
+      const { reporter, out } = capture();
+      const board = reporter.board([
+        { key: "a", label: "agent_a (general)" },
+        { key: "b", label: "agent_b (test-gap)" },
+      ]);
+      board.set("a", "running"); // running/queued produce no output off-TTY
+      board.set("b", "running");
+      board.set("b", "fail", "timed out"); // b finishes first
+      board.set("a", "ok", "3 findings");
+      board.stop();
+      const text = out.join("\n");
+      expect(text).not.toContain("running");
+      expect(text).toContain("agent_b (test-gap) — timed out");
+      expect(text).toContain("agent_a (general) — 3 findings");
+      expect(text.indexOf("agent_b")).toBeLessThan(text.indexOf("agent_a")); // completion order
+      expect(text).toContain("✓");
+      expect(text).toContain("✗");
+    });
+
+    it("resolves each row at most once", () => {
+      const { reporter, out } = capture();
+      const board = reporter.board([{ key: "a", label: "agent_a" }]);
+      board.set("a", "ok", "1 finding");
+      board.set("a", "fail", "should be ignored");
+      board.stop();
+      const text = out.join("\n");
+      expect(text).toContain("agent_a — 1 finding");
+      expect(text).not.toContain("should be ignored");
+    });
+  });
 });

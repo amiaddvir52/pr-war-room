@@ -1,24 +1,96 @@
-import type { ReviewConfig } from "../../config/schema.js";
+import type { ReviewConfig, ReviewerAngle } from "../../config/schema.js";
 import { FINDING_CATEGORIES, FINDING_SEVERITIES } from "../../findings/schema.js";
 
 /**
- * Prompt templates for the single reviewer (Phase 5). The system prompt encodes
- * the product principles (PRD §9): evidence over opinion, actionable over
+ * Prompt templates for the reviewer agents. The system prompt encodes the
+ * product principles (PRD §9): evidence over opinion, actionable over
  * exhaustive, and "would a senior teammate raise this in review?".
  *
- * Phase 5 has no downstream skeptic/judge yet, so the reviewer self-filters
+ * Phase 6 parameterizes the prompt by `angle`: `general` is the broad reviewer;
+ * the focused angles (test-gap, correctness, security, performance) narrow the
+ * persona and add a focus/ignore block so each agent looks at the change through
+ * a different lens (PRD §10.4). The shared principles and JSON contract are
+ * identical across angles.
+ *
+ * There is no downstream skeptic/judge yet, so each reviewer self-filters
  * against a concrete bar. When Phases 8–9 land, switch this to coverage-first
  * prompting (report everything, filter downstream) per the code-review guidance
  * for recent Claude models.
  */
-export function buildSystemPrompt(review: ReviewConfig): string {
+
+interface AnglePrompt {
+  /** Role lines that open the prompt. */
+  intro: string[];
+  /** Angle-specific focus / ignore guidance, placed after the shared principles. */
+  focus: string[];
+}
+
+const ANGLE_PROMPTS: Record<ReviewerAngle, AnglePrompt> = {
+  general: {
+    intro: [
+      "You are a senior software engineer performing a pre-review of a GitHub pull request,",
+      "before the author's human teammates see it. Surface the issues a careful human reviewer",
+      "would most likely raise — so the author can fix them first.",
+    ],
+    focus: [
+      "Bar for reporting: report issues that could cause incorrect behavior, a failing test, a",
+      "security or performance problem, missing tests for new behavior, or a violation of the",
+      "repo's own conventions. Omit trivial nits.",
+    ],
+  },
+  "test-gap": {
+    intro: [
+      "You are the Test Gap Reviewer performing a pre-review of a GitHub pull request.",
+      "Focus ONLY on missing or weak test coverage for the behavior this PR changes.",
+    ],
+    focus: [
+      "Only report a finding where a human reviewer would likely ask the author to add or",
+      "strengthen a test. Every finding MUST include a concrete `suggested_test` and should use",
+      'the "tests" category. Do not comment on style, performance, or unrelated correctness.',
+    ],
+  },
+  correctness: {
+    intro: [
+      "You are the Correctness Reviewer performing a pre-review of a GitHub pull request.",
+      "Focus on logic errors, edge cases, and incorrect assumptions in the changed code.",
+    ],
+    focus: [
+      "Look for: unhandled null/undefined, off-by-one and boundary errors, incorrect error",
+      "handling, race conditions, broken invariants, and mishandled return values — in the",
+      "changed code or code directly affected by it. Ignore pure style and test coverage.",
+    ],
+  },
+  security: {
+    intro: [
+      "You are the Security Reviewer performing a pre-review of a GitHub pull request.",
+      "Focus on security weaknesses introduced or exposed by the changed code.",
+    ],
+    focus: [
+      "Look for: injection (SQL/command/template), missing authentication or authorization",
+      "checks, unsafe secret/credential handling, unsafe deserialization, SSRF, and path",
+      'traversal. Prefer the "security" category. Ignore pure style and non-security nits.',
+    ],
+  },
+  performance: {
+    intro: [
+      "You are the Performance Reviewer performing a pre-review of a GitHub pull request.",
+      "Focus on performance regressions introduced by the changed code.",
+    ],
+    focus: [
+      "Look for: accidental quadratic work, N+1 queries, unnecessary allocations or copies,",
+      "blocking I/O on hot paths, and unbounded growth. Prefer the \"performance\" category.",
+      "Ignore micro-optimizations a reviewer wouldn't raise, and ignore pure style.",
+    ],
+  },
+};
+
+export function buildSystemPrompt(review: ReviewConfig, angle: ReviewerAngle = "general"): string {
   const niceToHave = review.includeNiceToHave
     ? "You may include a few high-value nice-to-have suggestions."
     : "Do not include nice-to-have or purely stylistic suggestions.";
+  const persona = ANGLE_PROMPTS[angle];
   return [
-    "You are a senior software engineer performing a pre-review of a GitHub pull request,",
-    "before the author's human teammates see it. Surface the issues a careful human reviewer",
-    "would most likely raise — so the author can fix them first.",
+    ...persona.intro,
     "",
     "Principles:",
     "- Evidence over opinion: every finding must cite concrete evidence from the diff, nearby",
@@ -30,9 +102,7 @@ export function buildSystemPrompt(review: ReviewConfig): string {
     `- ${niceToHave}`,
     "- Do not flag pure style unless it violates an explicit repo convention shown in the packet.",
     "",
-    "Bar for reporting: report issues that could cause incorrect behavior, a failing test, a",
-    "security or performance problem, missing tests for new behavior, or a violation of the",
-    "repo's own conventions. Omit trivial nits.",
+    ...persona.focus,
     "",
     `Report at most ${review.maxFindings} findings.`,
     "",

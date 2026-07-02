@@ -14,8 +14,8 @@ import type {
   BuildReviewPacketInput,
   BuildReviewPacketResult,
 } from "../../context/buildReviewPacket.js";
-import { runReviewer } from "../../agents/runReviewer.js";
-import type { RunReviewer } from "../../agents/runReviewer.js";
+import { runReviewers, isUsable } from "../../agents/runReviewers.js";
+import type { RunReviewers } from "../../agents/runReviewers.js";
 
 /** Phase-3 workspace prep. Injected so tests avoid git/subprocess side effects. */
 export type PrepareWorkspaceFn = (input: PrepareWorkspaceInput) => Promise<WorkspaceResult>;
@@ -39,8 +39,8 @@ export interface ReviewOptions {
   prepareWorkspace?: PrepareWorkspaceFn;
   /** Review-packet builder. Defaults to the real one; inject a fake in tests. */
   buildReviewPacket?: BuildReviewPacketFn;
-  /** Phase-5 single reviewer. Defaults to the real one; inject a fake in tests. */
-  runReviewer?: RunReviewer;
+  /** Phase-6 multi-agent reviewer fan-out. Defaults to the real one; inject a fake in tests. */
+  runReviewers?: RunReviewers;
 }
 
 /**
@@ -56,7 +56,7 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   const ingest = options.ingest ?? ingestPullRequest;
   const prepareWs = options.prepareWorkspace ?? prepareWorkspace;
   const buildPacket = options.buildReviewPacket ?? buildReviewPacket;
-  const review = options.runReviewer ?? runReviewer;
+  const review = options.runReviewers ?? runReviewers;
 
   const pr = parsePrUrl(prUrl);
   const { config, source, path } = await loadConfig(cwd);
@@ -141,9 +141,9 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
     );
   }
 
-  // Phase 5 — run a single reviewer and write validated, normalized findings.
-  // A hard failure (missing credentials) throws ReviewerError and aborts; a
-  // parse failure is reported by the reviewer and leaves an empty findings set.
+  // Phase 6 — fan out to multiple reviewer agents in parallel and merge their
+  // validated, normalized findings. Individual agents may fail, time out, or
+  // return nothing without aborting the run; only an all-agents failure throws.
   reporter.blank();
   const reviewResult = await review({
     packet,
@@ -153,13 +153,25 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
     reporter,
   });
 
+  // We only reach here when the run met `agents.minUsableReviewers` (otherwise
+  // runReviewers threw). `usable` reviewers returned valid output; the rest
+  // (unusable output / failed / timed out) are reported as a caveat, not success.
+  const total = reviewResult.agents.length;
+  const usable = reviewResult.agents.filter((a) => isUsable(a.status)).length;
+  const incomplete = reviewResult.agents.filter((a) => !isUsable(a.status));
+
   reporter.blank();
-  if (reviewResult.findings.length > 0) {
-    reporter.success(
-      `${reviewResult.findings.length} finding${reviewResult.findings.length === 1 ? "" : "s"} — see ${relative(paths.root, paths.normalized.allFindings)}`,
+  const n = reviewResult.findings.length;
+  reporter.success(
+    `${n} finding${n === 1 ? "" : "s"} from ${usable}/${total} reviewer${total === 1 ? "" : "s"} — ` +
+      `see ${relative(paths.root, paths.normalized.allFindings)}`,
+  );
+  if (incomplete.length > 0) {
+    reporter.warn(
+      `${incomplete.length} reviewer${incomplete.length === 1 ? "" : "s"} did not complete ` +
+        `(${incomplete.map((a) => `${a.name}: ${a.status}`).join(", ")}) — ` +
+        `see ${relative(paths.root, paths.raw.agentRuns)}`,
     );
-  } else {
-    reporter.note("No findings recorded.");
   }
   reporter.note("Dedupe, skeptic, judge and report generation arrive in later phases.");
 }

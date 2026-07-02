@@ -34,6 +34,27 @@ export interface Spinner {
   stop(): void;
 }
 
+/** One row of a {@link Reporter.board}: a stable `key` and its display `label`. */
+export interface BoardItem {
+  key: string;
+  label: string;
+}
+
+/** A board row's lifecycle. `queued`/`running` animate; `ok`/`fail` are terminal. */
+export type BoardStatus = "queued" | "running" | "ok" | "fail";
+
+/**
+ * A live multi-line status board (one row per item). On a TTY the rows animate
+ * and update in place; off-TTY it degrades to printing each row once as it
+ * reaches a terminal state.
+ */
+export interface Board {
+  /** Update a row. `detail` is shown for terminal states (e.g. "3 findings"). */
+  set(key: string, status: BoardStatus, detail?: string): void;
+  /** Freeze the final rows and stop animating. */
+  stop(): void;
+}
+
 /**
  * The single output seam for the CLI. Every command writes through a Reporter
  * so styling, quiet mode, and (later) a machine-readable mode live in one place.
@@ -160,6 +181,102 @@ export class Reporter {
       succeed: (l) => finish(l, true),
       fail: (l) => finish(l, false),
       stop: () => finish(undefined, true),
+    };
+  }
+
+  /**
+   * A live multi-line status board — one animated row per item, updated in
+   * place (queued → running → ✓/✗). Used by the multi-agent fan-out so the user
+   * sees every reviewer and which are still running. Off a TTY (piped / quiet /
+   * injected sink) it can't animate, so each row prints once when it resolves —
+   * the same clean, line-per-event output the rest of the CLI uses.
+   */
+  board(items: readonly BoardItem[]): Board {
+    interface RowState {
+      status: BoardStatus;
+      detail: string;
+      startedAt: number | null;
+    }
+    const labels = new Map(items.map((it) => [it.key, it.label]));
+    const state = new Map<string, RowState>(
+      items.map((it) => [it.key, { status: "queued", detail: "", startedAt: null }]),
+    );
+
+    if (!this.canAnimate) {
+      // No cursor control: print each row once when it reaches a terminal state,
+      // in the `name — detail ✓/✗` shape the streaming steps already use.
+      return {
+        set: (key, status, detail = "") => {
+          const row = state.get(key);
+          if (!row || (status !== "ok" && status !== "fail")) return;
+          if (row.status === "ok" || row.status === "fail") return; // resolve once
+          row.status = status;
+          this.step(`${labels.get(key) ?? key} — ${detail}`, status === "ok");
+        },
+        stop: () => {},
+      };
+    }
+
+    const width = items.reduce((max, it) => Math.max(max, it.label.length), 0);
+    // Keep rows inside the terminal so a wrapped line can't break our cursor math.
+    const cols = process.stdout.columns ?? 80;
+    const labelWidth = Math.min(width, Math.max(8, cols - 20));
+    const fitLabel = (label: string): string =>
+      label.length > labelWidth ? `${label.slice(0, labelWidth - 1)}…` : label.padEnd(labelWidth);
+
+    const elapsed = (ms: number): string => {
+      const s = Math.floor(ms / 1000);
+      return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
+    };
+
+    let frame = 0;
+    const rowText = (it: BoardItem, now: number): string => {
+      const row = state.get(it.key)!;
+      const mark =
+        row.status === "ok"
+          ? this.c.green(SYM.ok)
+          : row.status === "fail"
+            ? this.c.red(SYM.fail)
+            : row.status === "running"
+              ? this.c.cyan(SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!)
+              : this.c.dim("·");
+      const suffix =
+        row.status === "running"
+          ? this.c.dim(`running ${elapsed(now - (row.startedAt ?? now))}…`)
+          : row.status === "queued"
+            ? this.c.dim("queued")
+            : row.detail;
+      return `    ${mark} ${fitLabel(it.label)}  ${suffix}`;
+    };
+
+    // Initial paint: one line per row; the cursor ends on the line below the block.
+    for (const it of items) process.stdout.write(`${rowText(it, Date.now())}\n`);
+
+    const redraw = (): void => {
+      const now = Date.now();
+      process.stdout.write(`\x1b[${items.length}A`); // up to the first row
+      for (const it of items) process.stdout.write(`\x1b[2K${rowText(it, now)}\n`); // clear + redraw
+      frame++;
+    };
+    const timer = setInterval(redraw, SPINNER_INTERVAL_MS);
+    timer.unref?.();
+
+    let done = false;
+    return {
+      set: (key, status, detail = "") => {
+        const row = state.get(key);
+        if (!row || done) return;
+        if (status === "running" && row.startedAt === null) row.startedAt = Date.now();
+        row.status = status;
+        row.detail = detail;
+        redraw(); // reflect the change now, don't wait for the next tick
+      },
+      stop: () => {
+        if (done) return;
+        done = true;
+        clearInterval(timer);
+        redraw(); // final frozen state
+      },
     };
   }
 

@@ -2,10 +2,10 @@ import type { ReviewPacket } from "../context/types.js";
 import type { FindingCore } from "../findings/schema.js";
 
 /**
- * Agent abstractions (PRD §10.4, Phase 5). A `ReviewerAgent` turns a review
- * packet into raw findings; the orchestrator (`runReviewer`) validates,
- * normalizes, and persists them. Phase 6 adds more concrete reviewers behind
- * this same interface and runs them in parallel.
+ * Agent abstractions (PRD §10.4). A `ReviewerAgent` turns a review packet into
+ * raw findings; the orchestrator (`runReviewers`) validates, normalizes, and
+ * persists them. Phase 6 runs several reviewers behind this same interface in
+ * parallel.
  */
 
 export interface ReviewerInput {
@@ -20,9 +20,10 @@ export interface RawAgentResult {
   /** Parsed, schema-valid core findings (empty when parsing failed). */
   findings: FindingCore[];
   /**
-   * Non-null when the model produced no usable findings for a benign reason
-   * (refusal, truncation, or output that didn't match the schema). This is a
-   * soft failure — the run continues with zero findings.
+   * Non-null when the model produced no usable output (refusal, truncation, or
+   * output that didn't match the schema). The reviewer does not throw for this;
+   * the orchestrator records it as `unusable_output` (distinct from a valid
+   * empty `no_findings`) and it counts against the usable-reviewer threshold.
    */
   parseError: string | null;
 }
@@ -50,7 +51,7 @@ export interface ModelResult {
    * The response `stop_reason`. The API path passes the SDK value through
    * (`"end_turn"`, `"refusal"`, `"max_tokens"`, …); the CLI path normalizes its
    * result envelope to the same vocabulary, adding `"error"` for a backend
-   * error (`is_error: true`). `ClaudeReviewer` special-cases `"refusal"`,
+   * error (`is_error: true`). `Reviewer` special-cases `"refusal"`,
    * `"max_tokens"`, and `"error"` as benign soft failures.
    */
   stopReason: string | null;

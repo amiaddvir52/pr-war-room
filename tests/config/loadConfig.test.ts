@@ -45,18 +45,86 @@ describe("mergeConfig", () => {
     expect(merged.verification.commands).toEqual(["pytest"]);
   });
 
-  it("overrides a single model field", () => {
+  it("overrides the judge and leaves the reviewer roster intact", () => {
     const merged = mergeConfig(defaultConfig, { models: { judge: "codex" } });
     expect(merged.models.judge).toBe("codex");
-    expect(merged.models.primaryReviewer).toBe("claude");
+    expect(merged.agents.reviewers).toEqual(defaultConfig.agents.reviewers);
+  });
+
+  it("replaces agents.reviewers entirely, applying per-agent defaults, keeping siblings", () => {
+    const merged = mergeConfig(defaultConfig, {
+      agents: { reviewers: [{ name: "solo", backend: "mock" }] },
+    });
+    expect(merged.agents.reviewers).toHaveLength(1);
+    // angle/enabled default in via the schema.
+    expect(merged.agents.reviewers[0]).toMatchObject({
+      name: "solo",
+      backend: "mock",
+      angle: "general",
+      enabled: true,
+    });
+    expect(merged.agents.concurrency).toBe(defaultConfig.agents.concurrency);
   });
 
   it.each([
     { review: { maxFindings: -1 } },
     { review: { includeNiceToHave: "yes" } },
     { reviews: {} }, // unknown top-level key (strict)
+    { agents: { concurrency: 0 } }, // must be a positive int
+    { agents: { minUsableReviewers: 0 } }, // must be a positive int
+    { agents: { reviewers: [{ name: "bad name!", backend: "mock" }] } }, // name not fs-safe
+    { agents: { reviewers: [{ name: "x", backend: "nope" }] } }, // unknown backend
+    // exact-duplicate reviewer names collide on artifacts + finding ids
+    {
+      agents: {
+        reviewers: [
+          { name: "dup", backend: "mock" },
+          { name: "dup", backend: "mock" },
+        ],
+      },
+    },
+    // case-only-duplicate names collide on case-insensitive filesystems
+    {
+      agents: {
+        reviewers: [
+          { name: "Dup", backend: "mock" },
+          { name: "dup", backend: "mock" },
+        ],
+      },
+    },
+    { models: { primaryReviewer: "mock" } }, // stale pre-Phase-6 key
+    { models: { secondaryReviewer: "codex" } }, // stale pre-Phase-6 key
   ])("throws ConfigError for an invalid override (%j)", (override) => {
     expect(() => mergeConfig(defaultConfig, override)).toThrow(ConfigError);
+  });
+
+  it("rejects duplicate reviewer names with a name-focused message (case-insensitive)", () => {
+    expect(() =>
+      mergeConfig(defaultConfig, {
+        agents: {
+          reviewers: [
+            { name: "Reviewer", backend: "mock" },
+            { name: "reviewer", backend: "mock" },
+          ],
+        },
+      }),
+    ).toThrow(/duplicate reviewer name/i);
+  });
+
+  it("rejects stale models.primaryReviewer/secondaryReviewer, pointing to agents.reviewers", () => {
+    // Regression for the silent-strip bug: an upgraded config with the old keys
+    // must fail loudly (not silently drop them and swap the reviewer backend).
+    let message = "";
+    try {
+      mergeConfig(defaultConfig, { models: { primaryReviewer: "mock", secondaryReviewer: "codex" } });
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/agents\.reviewers/);
+    // And it is a hard error, not a silent success that dropped the keys.
+    expect(() =>
+      mergeConfig(defaultConfig, { models: { primaryReviewer: "mock" } }),
+    ).toThrow(ConfigError);
   });
 });
 

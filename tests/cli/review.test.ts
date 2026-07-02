@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runReview } from "../../src/cli/commands/review.js";
 import type { PrepareWorkspaceFn, BuildReviewPacketFn } from "../../src/cli/commands/review.js";
-import type { RunReviewer, RunReviewerInput } from "../../src/agents/runReviewer.js";
+import type { RunReviewers, RunReviewersInput } from "../../src/agents/runReviewers.js";
 import { PrUrlError, GitHubError, ReviewerError } from "../../src/errors.js";
 import { CONFIG_FILENAME } from "../../src/config/loadConfig.js";
 import { silentReporter } from "../../src/ui/reporter.js";
@@ -141,15 +141,15 @@ function capturingBuildPacket(): { fn: BuildReviewPacketFn; calls: BuildReviewPa
 }
 const fakeBuildPacket = (): BuildReviewPacketFn => capturingBuildPacket().fn;
 
-function capturingReviewer(): { fn: RunReviewer; calls: RunReviewerInput[] } {
-  const calls: RunReviewerInput[] = [];
-  const fn: RunReviewer = async (input) => {
+function capturingReviewer(): { fn: RunReviewers; calls: RunReviewersInput[] } {
+  const calls: RunReviewersInput[] = [];
+  const fn: RunReviewers = async (input) => {
     calls.push(input);
-    return { agent: "fake", findings: [], droppedCount: 0, parseError: null };
+    return { findings: [], agents: [] };
   };
   return { fn, calls };
 }
-const fakeReviewer = (): RunReviewer => capturingReviewer().fn;
+const fakeReviewer = (): RunReviewers => capturingReviewer().fn;
 
 /** Common injected fakes for the whole pipeline (Phases 1–5). */
 function fakes(extra: Partial<Parameters<typeof runReview>[1]> = {}) {
@@ -159,7 +159,7 @@ function fakes(extra: Partial<Parameters<typeof runReview>[1]> = {}) {
     ingest: fakeIngest(),
     prepareWorkspace: fakeWorkspace(),
     buildReviewPacket: fakeBuildPacket(),
-    runReviewer: fakeReviewer(),
+    runReviewers: fakeReviewer(),
     ...extra,
   };
 }
@@ -233,26 +233,31 @@ describe("runReview (integration)", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("passes the packet, markdown and config to the reviewer", async () => {
+  it("passes the packet, markdown and config to the reviewer fan-out", async () => {
     const rv = capturingReviewer();
-    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, runReviewer: rv.fn }));
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, runReviewers: rv.fn }));
     expect(rv.calls).toHaveLength(1);
     expect(rv.calls[0]?.packetMarkdown).toBe("# packet");
     expect(rv.calls[0]?.packet.schemaVersion).toBe(1);
-    expect(rv.calls[0]?.config.models.primaryReviewer).toBe("claude");
+    expect(rv.calls[0]?.config.agents.reviewers).toHaveLength(3);
+    expect(rv.calls[0]?.config.agents.reviewers[0]?.backend).toBe("claude");
   });
 
-  it("propagates a ReviewerError raised by the reviewer", async () => {
-    const failing: RunReviewer = async () => {
-      throw new ReviewerError("missing ANTHROPIC_API_KEY");
+  it("propagates a ReviewerError raised by the reviewer fan-out", async () => {
+    const failing: RunReviewers = async () => {
+      throw new ReviewerError("all reviewer agents failed");
     };
     await expect(
-      runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, runReviewer: failing })),
+      runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, runReviewers: failing })),
     ).rejects.toBeInstanceOf(ReviewerError);
   });
 
   it("runs the real mock reviewer end-to-end and writes normalized findings", async () => {
-    await writeFile(join(dir, CONFIG_FILENAME), JSON.stringify({ models: { primaryReviewer: "mock" } }), "utf8");
+    await writeFile(
+      join(dir, CONFIG_FILENAME),
+      JSON.stringify({ agents: { reviewers: [{ name: "mock", backend: "mock" }] } }),
+      "utf8",
+    );
     const buildPacketWithFile: BuildReviewPacketFn = async () => ({
       packet: {
         ...makePacket(),
@@ -272,7 +277,7 @@ describe("runReview (integration)", () => {
       markdown: "# packet",
     });
 
-    // Note: no `runReviewer` injected — the real one (with MockReviewer) runs.
+    // Note: no `runReviewers` injected — the real fan-out (with MockReviewer) runs.
     await runReview("https://github.com/org/repo/pull/123", {
       version: "0.1.0",
       reporter: silentReporter(),

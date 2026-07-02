@@ -1,4 +1,4 @@
-import type { ReviewConfig } from "../config/schema.js";
+import type { ReviewConfig, ReviewerAngle } from "../config/schema.js";
 import { ReviewerResponseSchema, REVIEWER_OUTPUT_JSON_SCHEMA } from "../findings/schema.js";
 import { buildSystemPrompt, buildUserPrompt } from "./prompts/reviewerPrompt.js";
 import type { ModelClient, RawAgentResult, ReviewerAgent, ReviewerInput } from "./types.js";
@@ -10,7 +10,7 @@ const PARSE_FAILED = Symbol("parse-failed");
  * Collect every top-level, balanced `{…}` object in `text`, in source order.
  * The scan is string-aware: braces inside JSON strings (and escaped quotes) do
  * not affect the depth count, so a `"{"` in a value can't unbalance it. This is
- * the tolerant fallback for the CLI path, where the model may wrap the JSON in
+ * the tolerant fallback for the CLI paths, where the model may wrap the JSON in
  * prose that itself contains braces — the previous first-`{`-to-last-`}` span
  * failed exactly that case.
  */
@@ -47,8 +47,8 @@ function balancedObjects(text: string): string[] {
 
 /**
  * Tolerant JSON extraction. The API (structured outputs) returns pure JSON, but
- * the CLI path is only prompt-guided, so the model may wrap the object in prose
- * or ```json fences. Try the whole string, then a fenced block, then each
+ * the CLI paths are only prompt-guided, so the model may wrap the object in
+ * prose or ```json fences. Try the whole string, then a fenced block, then each
  * balanced top-level `{…}` object. Returns `PARSE_FAILED` when nothing parses.
  */
 function extractJson(text: string): unknown {
@@ -81,22 +81,31 @@ function briefDetail(text: string): string {
 }
 
 /**
- * The Claude reviewer (PRD §10.4). Renders the packet into a prompt, asks the
- * model for structured findings, and validates them against the Finding schema.
- * Because it talks through the `ModelClient` seam, it is fully unit-testable
- * with a fake client — no network.
+ * A reviewer agent (PRD §10.4). Renders the packet into a prompt for its
+ * `angle`, asks the model (through the `ModelClient` seam) for structured
+ * findings, and validates them against the Finding schema. Because it talks
+ * through the seam it is fully unit-testable with a fake client — no network.
+ *
+ * One class serves every model-backed agent: the `backend` chooses the injected
+ * `ModelClient` (Claude CLI / Anthropic API / Codex CLI) and the `angle` chooses
+ * the prompt persona. `name` is the agent's identity in artifacts and finding
+ * ids. (The offline `MockReviewer` is separate — it fabricates findings.)
  */
-export class ClaudeReviewer implements ReviewerAgent {
-  readonly name = "claude";
+export class Reviewer implements ReviewerAgent {
+  readonly name: string;
 
   constructor(
+    name: string,
     private readonly client: ModelClient,
+    private readonly angle: ReviewerAngle,
     private readonly reviewConfig: ReviewConfig,
-  ) {}
+  ) {
+    this.name = name;
+  }
 
   async review(input: ReviewerInput): Promise<RawAgentResult> {
     const result = await this.client.complete({
-      system: buildSystemPrompt(this.reviewConfig),
+      system: buildSystemPrompt(this.reviewConfig, this.angle),
       user: buildUserPrompt(input.packetMarkdown),
       jsonSchema: REVIEWER_OUTPUT_JSON_SCHEMA,
     });

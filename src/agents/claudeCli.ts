@@ -1,5 +1,6 @@
-import { spawn } from "node:child_process";
-import { ReviewerError } from "../errors.js";
+import { ReviewerError, ReviewerTimeoutError } from "../errors.js";
+import { spawnCliRunner } from "./cliRunner.js";
+import type { CliRunner } from "./cliRunner.js";
 import type { ModelClient, ModelRequest, ModelResult } from "./types.js";
 
 /**
@@ -10,23 +11,12 @@ import type { ModelClient, ModelRequest, ModelResult } from "./types.js";
  * a local command …").
  *
  * The CLI has no structured-output enforcement, so the prompt asks for a JSON
- * object and `ClaudeReviewer` validates it (with a parse-failure path). For the
- * schema-guaranteed API path instead, use `models.primaryReviewer: "claude-api"`.
+ * object and the `Reviewer` validates it (with a parse-failure path). For the
+ * schema-guaranteed API path instead, use a `claude-api` backend.
  */
 
-export interface CliExecResult {
-  /** Process exit code, or null if killed (timeout/signal) or never spawned. */
-  code: number | null;
-  stdout: string;
-  stderr: string;
-  /** Set when the process couldn't be spawned (e.g. `claude` not on PATH). */
-  spawnError: string | null;
-  /** True when the process was killed because it exceeded the per-call timeout. */
-  timedOut: boolean;
-}
-
-/** Injectable seam: tests pass a fake runner instead of spawning `claude`. */
-export type CliRunner = (argv: string[], stdin: string) => Promise<CliExecResult>;
+// Re-exported for back-compat: the shared subprocess types now live in cliRunner.
+export type { CliExecResult, CliRunner } from "./cliRunner.js";
 
 export interface ClaudeCliOptions {
   /** Binary to invoke. Default `"claude"`. */
@@ -45,7 +35,7 @@ function setupHelp(detail: string): string {
   const suffix = detail ? ` (${detail})` : "";
   return (
     `The Claude CLI reviewer failed${suffix}. Make sure the \`claude\` CLI is installed ` +
-    "and logged in (run `claude login`). Alternatively set models.primaryReviewer to " +
+    "and logged in (run `claude login`). Alternatively set the agent's `backend` to " +
     '"claude-api" (uses the Anthropic API; needs ANTHROPIC_API_KEY) or "mock" (offline) ' +
     "in .pr-war-room.json."
   );
@@ -54,7 +44,7 @@ function setupHelp(detail: string): string {
 function timeoutHelp(timeoutMs: number): string {
   return (
     `The Claude CLI reviewer timed out after ${timeoutMs}ms without completing. The review ` +
-    "packet may be large or the model slow. Raise the timeout, or set models.primaryReviewer " +
+    "packet may be large or the model slow. Raise the timeout, or set the agent's `backend` " +
     'to "claude-api" (Anthropic API; needs ANTHROPIC_API_KEY) or "mock" (offline) in ' +
     ".pr-war-room.json."
   );
@@ -62,58 +52,6 @@ function timeoutHelp(timeoutMs: number): string {
 
 function firstLine(s: string): string {
   return s.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";
-}
-
-function spawnRunner(bin: string, timeoutMs: number): CliRunner {
-  return (argv, stdin) =>
-    new Promise<CliExecResult>((resolve) => {
-      let out = "";
-      let err = "";
-      let settled = false;
-      let timedOut = false;
-      const finish = (r: CliExecResult): void => {
-        if (!settled) {
-          settled = true;
-          resolve(r);
-        }
-      };
-
-      let child: ReturnType<typeof spawn>;
-      try {
-        child = spawn(bin, argv, { windowsHide: true });
-      } catch (e) {
-        finish({ code: null, stdout: "", stderr: "", spawnError: (e as Error).message, timedOut });
-        return;
-      }
-
-      // Flag the timeout before killing so `close` (which fires with a null code
-      // on SIGKILL, indistinguishable from a genuine crash) can be reported as a
-      // timeout rather than a misleading "exit code null".
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGKILL");
-      }, timeoutMs);
-      timer.unref?.();
-
-      child.stdout?.on("data", (c: Buffer) => {
-        out += c.toString("utf8");
-      });
-      child.stderr?.on("data", (c: Buffer) => {
-        err += c.toString("utf8");
-      });
-      child.on("error", (e: Error) => {
-        clearTimeout(timer);
-        finish({ code: null, stdout: out, stderr: err, spawnError: e.message, timedOut });
-      });
-      child.on("close", (code) => {
-        clearTimeout(timer);
-        finish({ code, stdout: out, stderr: err, spawnError: null, timedOut });
-      });
-
-      // Feed the prompt on stdin (the packet can be large — avoids arg limits).
-      child.stdin?.on("error", () => {}); // ignore EPIPE if the CLI closes stdin early
-      child.stdin?.end(stdin);
-    });
 }
 
 /**
@@ -149,7 +87,7 @@ function readString(envelope: unknown, key: string): string | null {
 
 /**
  * Map the `claude --output-format json` result envelope to a reviewer
- * `stopReason`, so `ClaudeReviewer`'s benign-outcome handling (truncation,
+ * `stopReason`, so the `Reviewer`'s benign-outcome handling (truncation,
  * backend error) works on the default CLI backend and not just the API path.
  * Precedence:
  *   1. An explicit model `stop_reason` (`max_tokens` / `refusal` / `end_turn`),
@@ -174,7 +112,7 @@ function cliStopReason(envelope: unknown): string {
 export function createClaudeCliModelClient(options: ClaudeCliOptions = {}): ModelClient {
   const bin = options.bin ?? "claude";
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const run = options.run ?? spawnRunner(bin, timeoutMs);
+  const run = options.run ?? spawnCliRunner(bin, timeoutMs);
 
   return {
     async complete(req: ModelRequest): Promise<ModelResult> {
@@ -188,7 +126,7 @@ export function createClaudeCliModelClient(options: ClaudeCliOptions = {}): Mode
       // A timeout kill lands here as a null exit code — surface it as a timeout,
       // not the install/login-oriented "exit code null" setup error.
       if (res.timedOut) {
-        throw new ReviewerError(timeoutHelp(timeoutMs));
+        throw new ReviewerTimeoutError(timeoutHelp(timeoutMs));
       }
       if (res.spawnError !== null) {
         const detail = /ENOENT/.test(res.spawnError)
