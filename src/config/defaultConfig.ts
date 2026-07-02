@@ -5,9 +5,25 @@ import type { Config } from "./types.js";
  * schema-complete at compile time.
  */
 export const defaultConfig: Config = {
+  // Phase 6 — the multi-agent reviewer roster. Three Claude-backed angles run
+  // in parallel by default, so `review` works with just `claude login`. Add a
+  // `codex`-backed agent (opt-in) for cross-model independence; `security` and
+  // `performance` are supported angles you can enable here too.
+  agents: {
+    reviewers: [
+      { name: "claude_general_reviewer", backend: "claude", angle: "general", enabled: true },
+      { name: "claude_test_gap_reviewer", backend: "claude", angle: "test-gap", enabled: true },
+      {
+        name: "claude_correctness_reviewer",
+        backend: "claude",
+        angle: "correctness",
+        enabled: true,
+      },
+    ],
+    concurrency: 4,
+    timeoutMs: 300_000,
+  },
   models: {
-    primaryReviewer: "claude",
-    secondaryReviewer: "codex",
     judge: "claude",
   },
   verification: {

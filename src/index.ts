@@ -37,7 +37,13 @@ export {
 export type { LoadedConfig } from "./config/loadConfig.js";
 export { defaultConfig } from "./config/defaultConfig.js";
 export { ConfigSchema } from "./config/schema.js";
-export type { Config } from "./config/types.js";
+export type {
+  Config,
+  AgentsConfig,
+  AgentSpec,
+  ReviewerBackend,
+  ReviewerAngle,
+} from "./config/types.js";
 
 export {
   getArtifactPaths,
@@ -120,13 +126,26 @@ export { partitionFindings } from "./findings/validateFinding.js";
 export type { PartitionResult, DroppedFinding } from "./findings/validateFinding.js";
 export { normalizeFindings } from "./findings/normalizeFindings.js";
 
-export { runReviewer } from "./agents/runReviewer.js";
-export type { RunReviewer, RunReviewerInput, RunReviewerResult } from "./agents/runReviewer.js";
-export { ClaudeReviewer } from "./agents/ClaudeReviewer.js";
+// Phase 6 — multi-agent reviewer fan-out
+export { runReviewers } from "./agents/runReviewers.js";
+export type {
+  RunReviewers,
+  RunReviewersInput,
+  RunReviewersResult,
+  AgentRun,
+  AgentStatus,
+} from "./agents/runReviewers.js";
+export { Reviewer } from "./agents/Reviewer.js";
 export { MockReviewer } from "./agents/MockReviewer.js";
+export { createModelClient } from "./agents/modelClient.js";
+export type { ModelClientOptions } from "./agents/modelClient.js";
 export { createAnthropicModelClient, REVIEWER_MODEL } from "./agents/anthropicClient.js";
 export { createClaudeCliModelClient } from "./agents/claudeCli.js";
-export type { ClaudeCliOptions, CliRunner, CliExecResult } from "./agents/claudeCli.js";
+export type { ClaudeCliOptions } from "./agents/claudeCli.js";
+export { createCodexCliModelClient } from "./agents/codexCli.js";
+export type { CodexCliOptions } from "./agents/codexCli.js";
+export { spawnCliRunner } from "./agents/cliRunner.js";
+export type { CliRunner, CliExecResult } from "./agents/cliRunner.js";
 export type {
   ReviewerAgent,
   ReviewerInput,

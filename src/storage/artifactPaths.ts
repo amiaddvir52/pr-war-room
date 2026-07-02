@@ -26,6 +26,8 @@ export interface ArtifactPaths {
     dir: string;
     reviewMd: (agent: string) => string;
     findingsJson: (agent: string) => string;
+    /** Phase 6 — per-agent run summary (which agents ran / failed / timed out). */
+    agentRuns: string;
   };
   normalized: { dir: string; allFindings: string };
 
@@ -95,6 +97,7 @@ export function getArtifactPaths(baseDir: string): ArtifactPaths {
       dir: p("raw"),
       reviewMd: (agent: string) => p("raw", `${agent}_review.md`),
       findingsJson: (agent: string) => p("raw", `${agent}_findings.json`),
+      agentRuns: p("raw", "agent_runs.json"),
     },
     normalized: {
       dir: p("normalized"),

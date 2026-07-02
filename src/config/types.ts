@@ -4,6 +4,10 @@
  */
 export type {
   Config,
+  AgentsConfig,
+  AgentSpec,
+  ReviewerBackend,
+  ReviewerAngle,
   ModelsConfig,
   VerificationConfig,
   ReviewConfig,

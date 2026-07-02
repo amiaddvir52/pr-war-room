@@ -3,13 +3,18 @@ import type { RawAgentResult, ReviewerAgent, ReviewerInput } from "./types.js";
 
 /**
  * An offline reviewer that fabricates a small, deterministic set of findings
- * from the packet's changed files — no API call. Selected via
- * `models.primaryReviewer: "mock"`. It lets CI and demos exercise the full
- * review flow with no API key, and satisfies the PRD note that the adapter "may
- * call a local command, SDK, or mocked model provider depending on config".
+ * from the packet's changed files — no API call. Selected via a `mock` backend
+ * in `agents.reviewers`. It lets CI and demos exercise the full review flow with
+ * no API key, and satisfies the PRD note that the adapter "may call a local
+ * command, SDK, or mocked model provider depending on config". The `name`
+ * defaults to `"mock"` but is configurable so several mock agents can coexist.
  */
 export class MockReviewer implements ReviewerAgent {
-  readonly name = "mock";
+  readonly name: string;
+
+  constructor(name = "mock") {
+    this.name = name;
+  }
 
   async review(input: ReviewerInput): Promise<RawAgentResult> {
     const findings = buildMockFindings(input);

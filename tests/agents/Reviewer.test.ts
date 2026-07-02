@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { ClaudeReviewer } from "../../src/agents/ClaudeReviewer.js";
+import { Reviewer } from "../../src/agents/Reviewer.js";
+import { buildSystemPrompt } from "../../src/agents/prompts/reviewerPrompt.js";
 import { createClaudeCliModelClient } from "../../src/agents/claudeCli.js";
-import type { CliRunner } from "../../src/agents/claudeCli.js";
+import type { CliRunner } from "../../src/agents/cliRunner.js";
 import type { ModelClient, ModelRequest, ModelResult } from "../../src/agents/types.js";
 import type { FindingCore } from "../../src/findings/schema.js";
 import type { ReviewConfig } from "../../src/config/schema.js";
@@ -41,54 +42,58 @@ function fakeClient(result: ModelResult): { client: ModelClient; requests: Model
 
 const input = { packet: makeReviewPacket(), packetMarkdown: "# HELLO PACKET" };
 
-describe("ClaudeReviewer", () => {
+function reviewer(client: ModelClient, angle: "general" | "test-gap" | "correctness" = "general") {
+  return new Reviewer("claude_general_reviewer", client, angle, REVIEW);
+}
+
+describe("Reviewer", () => {
   it("parses structured findings on a normal completion", async () => {
     const { client } = fakeClient({
       text: JSON.stringify({ findings: [coreFinding()] }),
       stopReason: "end_turn",
     });
-    const result = await new ClaudeReviewer(client, REVIEW).review(input);
+    const result = await reviewer(client).review(input);
     expect(result.parseError).toBeNull();
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0]?.title).toBe("Null deref");
   });
 
-  it("passes the packet markdown to the model", async () => {
+  it("passes the packet markdown and the angle's system prompt to the model", async () => {
     const { client, requests } = fakeClient({
       text: JSON.stringify({ findings: [] }),
       stopReason: "end_turn",
     });
-    await new ClaudeReviewer(client, REVIEW).review(input);
+    await reviewer(client, "test-gap").review(input);
     expect(requests[0]?.user).toContain("# HELLO PACKET");
+    expect(requests[0]?.system).toContain("Test Gap Reviewer");
     expect(requests[0]?.jsonSchema).toBeTypeOf("object");
   });
 
   it("reports a soft failure when the model output is truncated", async () => {
     const { client } = fakeClient({ text: "{", stopReason: "max_tokens" });
-    const result = await new ClaudeReviewer(client, REVIEW).review(input);
+    const result = await reviewer(client).review(input);
     expect(result.findings).toHaveLength(0);
     expect(result.parseError).toMatch(/max_tokens/);
   });
 
   it("reports a soft failure when the model refuses", async () => {
     const { client } = fakeClient({ text: "", stopReason: "refusal" });
-    const result = await new ClaudeReviewer(client, REVIEW).review(input);
+    const result = await reviewer(client).review(input);
     expect(result.parseError).toMatch(/refus/);
   });
 
   it("tolerates JSON wrapped in a markdown code fence (CLI path)", async () => {
     const fenced = "Here are the findings:\n```json\n" + JSON.stringify({ findings: [coreFinding()] }) + "\n```";
     const { client } = fakeClient({ text: fenced, stopReason: "end_turn" });
-    const result = await new ClaudeReviewer(client, REVIEW).review(input);
+    const result = await reviewer(client).review(input);
     expect(result.parseError).toBeNull();
     expect(result.findings).toHaveLength(1);
   });
 
   it("extracts the JSON object even when the surrounding prose contains braces", async () => {
-    // The old outermost-`{`-to-`}` span grabbed `{curly}` … `{ok}` and failed.
     const text = 'Use {curly} placeholders.\n{"findings":[]}\nDone {ok}.';
     const { client } = fakeClient({ text, stopReason: "end_turn" });
-    const result = await new ClaudeReviewer(client, REVIEW).review(input);
+    const result = await reviewer(client).review(input);
     expect(result.parseError).toBeNull();
     expect(result.findings).toHaveLength(0);
   });
@@ -96,7 +101,7 @@ describe("ClaudeReviewer", () => {
   it("extracts a populated findings object embedded in brace-laden prose", async () => {
     const text = `Notes {a}: ${JSON.stringify({ findings: [coreFinding()] })} — done {b}.`;
     const { client } = fakeClient({ text, stopReason: "end_turn" });
-    const result = await new ClaudeReviewer(client, REVIEW).review(input);
+    const result = await reviewer(client).review(input);
     expect(result.parseError).toBeNull();
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0]?.title).toBe("Null deref");
@@ -108,14 +113,14 @@ describe("ClaudeReviewer", () => {
       text: JSON.stringify({ findings: [finding] }),
       stopReason: "end_turn",
     });
-    const result = await new ClaudeReviewer(client, REVIEW).review(input);
+    const result = await reviewer(client).review(input);
     expect(result.parseError).toBeNull();
     expect(result.findings).toHaveLength(1);
   });
 
   it("reports a backend error distinctly (not as invalid JSON) on stop_reason error", async () => {
     const { client } = fakeClient({ text: "Error: rate limit exceeded", stopReason: "error" });
-    const result = await new ClaudeReviewer(client, REVIEW).review(input);
+    const result = await reviewer(client).review(input);
     expect(result.findings).toHaveLength(0);
     expect(result.parseError).toMatch(/stop_reason: error/);
     expect(result.parseError).toMatch(/rate limit exceeded/);
@@ -124,7 +129,7 @@ describe("ClaudeReviewer", () => {
 
   it("reports a parse failure on non-JSON output", async () => {
     const { client } = fakeClient({ text: "sorry, here are my thoughts…", stopReason: "end_turn" });
-    const result = await new ClaudeReviewer(client, REVIEW).review(input);
+    const result = await reviewer(client).review(input);
     expect(result.findings).toHaveLength(0);
     expect(result.parseError).toMatch(/JSON/);
   });
@@ -134,27 +139,41 @@ describe("ClaudeReviewer", () => {
       text: JSON.stringify({ findings: [{ title: "incomplete" }] }),
       stopReason: "end_turn",
     });
-    const result = await new ClaudeReviewer(client, REVIEW).review(input);
+    const result = await reviewer(client).review(input);
     expect(result.findings).toHaveLength(0);
     expect(result.parseError).toMatch(/schema/);
   });
 });
 
+describe("buildSystemPrompt angles", () => {
+  it("uses the general persona and reporting bar by default", () => {
+    const prompt = buildSystemPrompt(REVIEW);
+    expect(prompt).toContain("senior software engineer performing a pre-review");
+    expect(prompt).toContain("Bar for reporting");
+  });
+
+  it("narrows the persona per focused angle", () => {
+    expect(buildSystemPrompt(REVIEW, "test-gap")).toContain("Test Gap Reviewer");
+    expect(buildSystemPrompt(REVIEW, "test-gap")).toContain("suggested_test");
+    expect(buildSystemPrompt(REVIEW, "correctness")).toContain("Correctness Reviewer");
+    expect(buildSystemPrompt(REVIEW, "security")).toContain("Security Reviewer");
+    expect(buildSystemPrompt(REVIEW, "performance")).toContain("Performance Reviewer");
+  });
+});
+
 /**
- * Regression tests for the DEFAULT (Claude CLI) backend, wiring the real
- * `createClaudeCliModelClient` to `ClaudeReviewer` through a fake `CliRunner`.
- * The API path is already covered above; these lock in that CLI errors and
- * truncation reach the reviewer's benign-outcome branches rather than the
- * generic "did not contain valid JSON".
+ * Regression tests for a CLI backend, wiring the real `createClaudeCliModelClient`
+ * to a `Reviewer` through a fake `CliRunner`: CLI errors and truncation must
+ * reach the reviewer's benign-outcome branches, not the generic "invalid JSON".
  */
-describe("ClaudeReviewer over the CLI backend", () => {
+describe("Reviewer over the CLI backend", () => {
   const cliRunner =
     (stdout: string): CliRunner =>
     async () => ({ code: 0, stdout, stderr: "", spawnError: null, timedOut: false });
 
   function reviewViaCli(stdout: string) {
     const client = createClaudeCliModelClient({ run: cliRunner(stdout) });
-    return new ClaudeReviewer(client, REVIEW).review(input);
+    return reviewer(client).review(input);
   }
 
   it("parses findings from a normal CLI result envelope", async () => {

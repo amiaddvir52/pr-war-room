@@ -2,10 +2,10 @@ import type { ReviewPacket } from "../context/types.js";
 import type { FindingCore } from "../findings/schema.js";
 
 /**
- * Agent abstractions (PRD §10.4, Phase 5). A `ReviewerAgent` turns a review
- * packet into raw findings; the orchestrator (`runReviewer`) validates,
- * normalizes, and persists them. Phase 6 adds more concrete reviewers behind
- * this same interface and runs them in parallel.
+ * Agent abstractions (PRD §10.4). A `ReviewerAgent` turns a review packet into
+ * raw findings; the orchestrator (`runReviewers`) validates, normalizes, and
+ * persists them. Phase 6 runs several reviewers behind this same interface in
+ * parallel.
  */
 
 export interface ReviewerInput {
@@ -50,7 +50,7 @@ export interface ModelResult {
    * The response `stop_reason`. The API path passes the SDK value through
    * (`"end_turn"`, `"refusal"`, `"max_tokens"`, …); the CLI path normalizes its
    * result envelope to the same vocabulary, adding `"error"` for a backend
-   * error (`is_error: true`). `ClaudeReviewer` special-cases `"refusal"`,
+   * error (`is_error: true`). `Reviewer` special-cases `"refusal"`,
    * `"max_tokens"`, and `"error"` as benign soft failures.
    */
   stopReason: string | null;

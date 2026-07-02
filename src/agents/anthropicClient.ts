@@ -20,7 +20,7 @@ function authHelp(error: unknown): string {
   const detail = error instanceof Error ? ` (${error.message})` : "";
   return (
     `The "claude-api" reviewer needs Anthropic API credentials${detail}. ` +
-    "Set ANTHROPIC_API_KEY (https://console.anthropic.com/), or set models.primaryReviewer " +
+    "Set ANTHROPIC_API_KEY (https://console.anthropic.com/), or set the agent's `backend` " +
     'to "claude" to use the local Claude CLI login instead (no key), or "mock" to run offline.'
   );
 }

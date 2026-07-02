@@ -19,6 +19,10 @@ describe("getArtifactPaths", () => {
     expect(paths.raw.reviewMd("codex")).toBe(join(root, "raw", "codex_review.md"));
   });
 
+  it("builds the per-run agent summary path", () => {
+    expect(paths.raw.agentRuns).toBe(join(root, "raw", "agent_runs.json"));
+  });
+
   it("matches the PRD layout for deep paths", () => {
     expect(paths.github.diff).toBe(join(root, "github", "diff.patch"));
     expect(paths.context.packetJson).toBe(join(root, "context", "review_packet.json"));

@@ -13,17 +13,18 @@ patches.
 
 ## Status
 
-This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–5** are
+This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–6** are
 implemented: the CLI skeleton, configuration system, PR-URL parsing, the
 `.ai-review/` artifact layout, **GitHub PR ingestion** (metadata, changed files,
 and diff), the **local workspace** (a shallow checkout of the PR head with
 project-type / package-manager / verification-command detection and optional
 verification runs), the **review packet** — a structured `review_packet.json`
 + `review_packet.md` combining PR intent, diffs, nearby code context, detected
-repo conventions, and verification results — and the **single reviewer baseline**:
-one AI reviewer runs against the packet and its findings are validated against a
-strict schema and written as normalized findings. Multi-agent fan-out,
-deduplication, the skeptic and judge steps, and report generation arrive next.
+repo conventions, and verification results — and the **multi-agent reviewer
+fan-out**: several independent review agents run in parallel against the packet,
+each with its own review angle, and their validated findings are merged into a
+single normalized set. Deduplication, the skeptic and judge steps, and report
+generation arrive next.
 
 GitHub access uses `GITHUB_TOKEN` if set, otherwise `GH_TOKEN`, otherwise
 `GITHUB_PERSONAL_ACCESS_TOKEN` (the same token the GitHub MCP server uses, so if
@@ -32,18 +33,31 @@ setup), otherwise the `gh` CLI (`gh auth token`). If none is available the tool
 prints a setup message and exits. Ingestion stays a deterministic REST fetch —
 we reuse the MCP's credential rather than driving MCP tools through the CLI.
 
-The reviewer backend is chosen by `models.primaryReviewer`:
+The reviewer roster is a list of agents under `agents.reviewers`, run in
+parallel. Each agent is a **backend × angle**: the `backend` picks the model
+client, the `angle` picks the review persona. If one agent fails, times out, or
+returns nothing, the run continues and records it — a per-run summary of which
+agents ran, failed, or timed out is written to `.ai-review/raw/agent_runs.json`.
 
-- `"claude"` (default) shells out to the locally-installed **Claude Code CLI**
-  (`claude -p`), reusing your existing `claude login` — no API key and no
-  separate API billing. Install the CLI and log in once (`claude login`).
+Backends:
+
+- `"claude"` (the default roster's backend) shells out to the locally-installed
+  **Claude Code CLI** (`claude -p`), reusing your existing `claude login` — no
+  API key and no separate API billing. Install the CLI and log in once.
 - `"claude-api"` uses the **Anthropic API** directly (`claude-opus-4-8`) and needs
   `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`). This path gets structured
-  outputs (schema-guaranteed JSON); the CLI path validates prompt-guided JSON.
+  outputs (schema-guaranteed JSON); the CLI paths validate prompt-guided JSON.
+- `"codex"` shells out to the **OpenAI Codex CLI** (`codex exec`), reusing your
+  `codex login`. It is **opt-in** (not in the default roster) for cross-model
+  independence; if the `codex` binary/auth is missing that agent is recorded as
+  failed with a diagnostic and the Claude-backed reviewers still run.
 - `"mock"` produces deterministic placeholder findings with no external call —
   handy for CI or a demo without any credentials.
 
-(`"codex"` and multi-reviewer fan-out arrive in Phase 6.)
+Angles: `general` (broad review), `test-gap`, `correctness`, `security`,
+`performance`. The default roster runs three Claude-backed agents —
+`general`, `test-gap`, and `correctness`; `security` and `performance` are
+supported opt-in angles. `models.judge` selects the ranker used in a later phase.
 
 ## Requirements
 
@@ -76,9 +90,10 @@ Every run writes artifacts under `.ai-review/` in the current directory:
 the PR head), `workspace/workspace_metadata.json`, and
 `verification/initial_verification.json`; the review packet at
 `context/review_packet.json` + `context/review_packet.md`; and the reviewer output —
-`raw/<agent>_review.md` (verbatim model output), `raw/<agent>_findings.json` (that agent's
-validated findings), and `normalized/all_findings.json` (normalized findings, the input to
-later phases).
+`raw/<agent>_review.md` (verbatim model output) and `raw/<agent>_findings.json` (that
+agent's validated findings) **per agent**, `raw/agent_runs.json` (which agents ran,
+failed, or timed out), and `normalized/all_findings.json` (every agent's findings merged
+and normalized — the input to later phases).
 
 Verification is **opt-in**: detection always runs, but commands only execute with
 `--verify` (or `verification.enabled: true`). This matters because running a PR's
@@ -94,9 +109,16 @@ the current directory, in which case it is deep-merged over the defaults
 
 ```json
 {
+  "agents": {
+    "reviewers": [
+      { "name": "claude_general_reviewer", "backend": "claude", "angle": "general" },
+      { "name": "claude_test_gap_reviewer", "backend": "claude", "angle": "test-gap" },
+      { "name": "claude_correctness_reviewer", "backend": "claude", "angle": "correctness" }
+    ],
+    "concurrency": 4,
+    "timeoutMs": 300000
+  },
   "models": {
-    "primaryReviewer": "claude",
-    "secondaryReviewer": "codex",
     "judge": "claude"
   },
   "verification": {
@@ -116,6 +138,14 @@ the current directory, in which case it is deep-merged over the defaults
   }
 }
 ```
+
+`agents.reviewers` is the parallel reviewer roster (the array **replaces** the
+default when set). Each entry needs a filesystem-safe `name` (used for its
+`raw/<name>_*` artifacts and finding ids), a `backend`, and an `angle`; `enabled`
+(default `true`) and a per-agent `timeoutMs` override are optional.
+`agents.concurrency` caps how many run at once and `agents.timeoutMs` is the
+default per-agent timeout. Add a `{ "backend": "codex", … }` entry to bring in
+the opt-in cross-model reviewer.
 
 `context.maxPacketBytes` soft-caps the review packet (largest patches are trimmed
 with a warning if exceeded); `context.nearbyContextLines` sets how much

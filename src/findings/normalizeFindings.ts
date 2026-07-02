@@ -6,9 +6,8 @@ import type { Finding, FindingCore } from "./schema.js";
  * and `raw_agent_output_ref` ourselves rather than trusting the model, which
  * guarantees stable, unique ids (`<agent>-001`, `<agent>-002`, …).
  *
- * Pure — the orchestrator (`runReviewer`) is responsible for writing the
- * `normalized/all_findings.json` artifact. Phase 6 will merge multiple
- * reviewers' findings before writing that file.
+ * Pure — the orchestrator (`runReviewers`) is responsible for merging every
+ * reviewer's findings and writing the `normalized/all_findings.json` artifact.
  */
 
 export interface NormalizeOptions {

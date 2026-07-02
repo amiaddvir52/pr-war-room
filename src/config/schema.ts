@@ -6,11 +6,54 @@ import { z } from "zod";
  * pattern for the Finding / cluster / skeptic / judge schemas.
  */
 
+/** Model backends a reviewer agent can run on (Phase 6). */
+export const REVIEWER_BACKENDS = ["claude", "claude-api", "codex", "mock"] as const;
+export const ReviewerBackendSchema = z.enum(REVIEWER_BACKENDS);
+
+/**
+ * Review "angles" — the persona/focus a reviewer takes (Phase 6). `general` is
+ * the broad reviewer; the rest are focused lenses (PRD §10.4). `security` and
+ * `performance` are supported but not enabled by default.
+ */
+export const REVIEWER_ANGLES = [
+  "general",
+  "test-gap",
+  "correctness",
+  "security",
+  "performance",
+] as const;
+export const ReviewerAngleSchema = z.enum(REVIEWER_ANGLES);
+
+/**
+ * One reviewer agent in the multi-agent fan-out (Phase 6). A reviewer is a
+ * `backend` × `angle`: the backend picks the model client, the angle picks the
+ * prompt persona. `name` must be filesystem-safe — it becomes the artifact
+ * filename stem (`raw/<name>_review.md`) and the finding-id prefix (`<name>-001`).
+ */
+export const AgentSpecSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .regex(/^[A-Za-z0-9_-]+$/, "must be filesystem-safe (letters, digits, '_' or '-')"),
+  backend: ReviewerBackendSchema,
+  angle: ReviewerAngleSchema.default("general"),
+  enabled: z.boolean().default(true),
+  // Per-agent timeout override; falls back to `agents.timeoutMs` when unset.
+  timeoutMs: z.number().int().positive().optional(),
+});
+
+export const AgentsConfigSchema = z.object({
+  // The reviewer roster. Runs in parallel; disabled entries are skipped.
+  reviewers: z.array(AgentSpecSchema).default([]),
+  // Max reviewers running at once (each may spawn a subprocess / model call).
+  concurrency: z.number().int().positive().default(4),
+  // Default per-agent timeout in ms (a hung reviewer is recorded, not fatal).
+  timeoutMs: z.number().int().positive().default(300_000),
+});
+
 export const ModelsConfigSchema = z.object({
-  // Kept as free strings (not z.enum) so later phases can add reviewers like
-  // `test_gap_reviewer` without a schema change.
-  primaryReviewer: z.string(),
-  secondaryReviewer: z.string(),
+  // The reviewer roster moved to `agents.reviewers` (Phase 6). `judge` stays a
+  // free string here for the Phase 9 LLM-as-a-judge step.
   judge: z.string(),
 });
 
@@ -58,6 +101,7 @@ export const CiConfigSchema = z
 
 export const ConfigSchema = z
   .object({
+    agents: AgentsConfigSchema,
     models: ModelsConfigSchema,
     verification: VerificationConfigSchema,
     review: ReviewConfigSchema,
@@ -67,6 +111,10 @@ export const ConfigSchema = z
   // Reject unknown top-level keys so typos in a user config fail loudly.
   .strict();
 
+export type ReviewerBackend = z.infer<typeof ReviewerBackendSchema>;
+export type ReviewerAngle = z.infer<typeof ReviewerAngleSchema>;
+export type AgentSpec = z.infer<typeof AgentSpecSchema>;
+export type AgentsConfig = z.infer<typeof AgentsConfigSchema>;
 export type ModelsConfig = z.infer<typeof ModelsConfigSchema>;
 export type VerificationConfig = z.infer<typeof VerificationConfigSchema>;
 export type ReviewConfig = z.infer<typeof ReviewConfigSchema>;
