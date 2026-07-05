@@ -77,11 +77,21 @@ Backends:
   handy for CI or a demo without any credentials.
 
 Angles: `general` (broad review), `test-gap`, `correctness`, `security`,
-`performance`. The default roster runs four independent agents — a Claude
-`general`, `test-gap`, and `correctness` reviewer plus a **Codex `general`
-reviewer** (detection-gated, above); `security` and `performance` are supported
-opt-in angles. `judge.backend` selects the model the Phase-9 ranker runs on (see
-the `judge` config below).
+`performance`, `repo-pattern` (divergence from the repo's own conventions), and
+`product-intent` (does the change do what the PR says it does). The default
+roster is the **`standard` preset**, ten agents covering all seven angles:
+seven Claude-backed reviewers (`general`, `test-gap`, `correctness`,
+`repo-pattern`, `security`, `performance`, `product-intent`) plus **three
+Codex reviewers** (`general`, `correctness`, `security` — all detection-gated,
+above), so the highest-value angles get cross-vendor agreement by default. Set
+`agents.preset` to pick a different roster: `"fast"` (3 agents — the two
+cross-vendor generals + correctness), `"standard"` (the 10-agent default),
+`"deep"` (currently identical to `standard`, which absorbed its cross-vendor
+duplicates; kept for compatibility and will grow again when more angles merit
+duplication), or `"demo"` (a pinned snapshot of the previous 8-agent roster,
+frozen so stage runs keep the roster they were rehearsed with).
+`judge.backend` selects the model the Phase-9 ranker runs on (see the `judge`
+config below).
 
 ## Requirements
 
@@ -139,11 +149,10 @@ the current directory, in which case it is deep-merged over the defaults
 ```json
 {
   "agents": {
+    "preset": "standard",
     "reviewers": [
-      { "name": "claude_general_reviewer", "backend": "claude", "angle": "general" },
-      { "name": "codex_general_reviewer", "backend": "codex", "angle": "general" },
-      { "name": "claude_test_gap_reviewer", "backend": "claude", "angle": "test-gap" },
-      { "name": "claude_correctness_reviewer", "backend": "claude", "angle": "correctness" }
+      { "name": "claude_performance_reviewer", "enabled": false },
+      { "name": "my_extra_reviewer", "backend": "codex", "angle": "security" }
     ],
     "concurrency": 4,
     "timeoutMs": 300000,
@@ -185,17 +194,40 @@ the current directory, in which case it is deep-merged over the defaults
 }
 ```
 
-`agents.reviewers` is the parallel reviewer roster (the array **replaces** the
-default when set — so to select reviewers you provide the full list you want).
+The reviewer roster resolves from `agents.preset` and `agents.reviewers` in four
+deterministic cases:
+
+- **neither set** → the default `standard` roster (ten agents, all seven angles).
+- **`preset` only** → that preset's roster.
+- **`reviewers` only** → the array **replaces** the default roster exactly, as
+  it always has — provide the full list you want (unchanged legacy behavior).
+- **both** → the preset roster is the base and each `reviewers` entry merges
+  **by name** (case-insensitively; the preset member keeps its canonical name
+  casing, since the name is its artifact-filename stem): an entry naming a
+  preset member overrides just the fields it sets (so
+  `{ "name": "...", "enabled": false }` disables one agent without re-listing
+  the rest), and an entry with a new name is **appended** and must be a full spec
+  (`name` + `backend` + `angle` — enforced). Misspellings fail loudly, with
+  the entry's own array index and the preset's member names: a partial entry
+  matching no member, an appended entry that is disabled (always a typo'd
+  disable — appending a disabled agent is a no-op), an unknown field key like
+  `"enable"`, and a name listed twice are all rejected. The one silent case
+  left is a misspelled name on an *enabled full spec* — that's a legitimate
+  append, so check the summary board if you see one agent too many.
+
 Each entry needs a filesystem-safe `name` (used for its `raw/<name>_*` artifacts
 and finding ids, so names must be unique — compared case-insensitively), a
 `backend`, and an `angle`; `enabled` and a per-agent `timeoutMs` override are
-optional. `agents.concurrency` caps how many run at once and `agents.timeoutMs`
-is the default per-agent timeout. To **force-enable / force-disable** a reviewer,
-set `"enabled": true`/`false` on its entry — the default Codex reviewer is
-enabled but only *runs* when the `codex` CLI is detected, so setting
-`"enabled": false` on it (or removing it) is how you turn Codex off explicitly; a
-disabled agent is reported as `skipped: disabled by config`, not hidden.
+optional. `agents.concurrency` caps how many run at once (default `4` — the
+10-agent standard roster runs in three waves; raise to `10` for a single wave
+if your machine and rate limits absorb all 10 CLI subprocesses at once — 7
+`claude`, plus 3 `codex` when Codex is installed) and `agents.timeoutMs` is the default per-agent timeout. To **force-enable / force-disable** a reviewer, set
+`"enabled": true`/`false` on its entry — the default Codex reviewers are
+enabled but only *run* when the `codex` CLI is detected, so setting
+`"enabled": false` on each is how you turn Codex off explicitly; a disabled
+agent is reported as `skipped: disabled by config`, not hidden. The ten-agent
+default costs roughly 2.5× the model calls of the old four-agent roster;
+`{"agents": {"preset": "fast"}}` is the one-line opt-down.
 
 `agents.minUsableReviewers` (default `1`) is the success threshold: the review
 succeeds only if at least this many reviewers that **ran** return **usable**

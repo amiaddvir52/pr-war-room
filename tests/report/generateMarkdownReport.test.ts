@@ -195,6 +195,24 @@ describe("renderMarkdownReport", () => {
     expect(mustFix).toContain("**Suggested test:** test a user with no profile");
   });
 
+  it("lists every agreeing reviewer when a large roster converges on one finding", () => {
+    const agents = [
+      "claude_general_reviewer",
+      "codex_general_reviewer",
+      "claude_correctness_reviewer",
+      "claude_security_reviewer",
+      "claude_product_intent_reviewer",
+    ];
+    const md = renderMarkdownReport(
+      makeInput({
+        final: [finalFinding({ severity: "blocker", agreement: 5, source_agents: agents })],
+      }),
+    );
+    expect(section(md, "Must Fix Before Human Review")).toContain(
+      `**Reported by:** 5 reviewers (${agents.join(", ")})`,
+    );
+  });
+
   it("groups a should_fix finding under Should Fix, not Must Fix", () => {
     const md = renderMarkdownReport(
       makeInput({

@@ -1,9 +1,10 @@
 # Follow-up cleanup items
 
 Non-blocking cleanup/reuse findings surfaced during the Phase 9/10 (judge +
-report) code review. The four **report-renderer correctness bugs** from that
-review are already fixed and covered by regression tests; these are
-quality-only follow-ups (no behavior bug) deferred to a later pass.
+report) code review, plus later follow-ups (item 5, from the reviewer-roster
+expansion). The four **report-renderer correctness bugs** from that review are
+already fixed and covered by regression tests; these are quality-only
+follow-ups (no behavior bug) deferred to a later pass.
 
 ## 1. Extract the tolerant "parse last valid JSON object" loop (reuse)
 
@@ -46,7 +47,17 @@ reclassification with a typed exhaustive assertion so a real `"drop"` reaching
 here would fail loudly instead of being masked; only the type-level `Exclude`
 narrow is actually needed.
 
-## 5. Trim redundant work in the judge/report path (simplification + efficiency)
+## 5. Revisit skeptic/judge concurrency for the 10-agent default roster (tuning)
+
+The default roster grew from 4 to 10 reviewers (`standard` preset, now
+including cross-vendor codex correctness/security duplicates), so dedupe
+now feeds more clusters into the per-cluster skeptic and judge phases, which
+still run at `concurrency: 4` (deliberately unchanged — don't pre-optimize).
+If a real run measures slow in those phases, bump `skeptic.concurrency` /
+`judge.concurrency` defaults (6–8); the calls are short (60 s timeout) and
+I/O-bound, so the raise is low-risk.
+
+## 6. Trim redundant work in the judge/report path (simplification + efficiency)
 
 - `reconcileJudge`'s failure branch in `src/agents/runJudge.ts` returns
   `model_verdict: modelVerdict`, which is always `null` on that path (every
@@ -56,3 +67,23 @@ narrow is actually needed.
   several stages (`runJudge`, `selectFinalFindings`, `buildPool`,
   `collectDropped`). Low impact at current sizes, but a single shared index
   passed down would remove the repeated construction.
+
+## 7. Return a fresh config from `loadConfig`'s no-config-file path (hardening)
+
+When no `.pr-war-room.json` exists, `loadConfig` returns the module-level
+`defaultConfig` singleton by reference (`src/config/loadConfig.ts`), while the
+file-present path re-parses through `ConfigSchema` and returns fresh objects.
+No in-repo caller mutates the config and the CLI is one-shot, but both
+`loadConfig` and `defaultConfig` are exported from `src/index.ts`, so a
+long-lived programmatic consumer that mutates the returned config would
+silently poison every later default load in the same process. Clone (or
+schema-re-parse) on that path, or `Object.freeze` the exported default.
+
+## 8. Consider `.strict()` for the remaining config sub-schemas (consistency)
+
+`AgentSpecSchema` and `AgentsConfigSchema` are now `.strict()`, so a typo'd
+`preset` key or per-agent field key fails loudly. The other sub-schemas
+(`verification`, `review`, `context`, `dedup`, `skeptic`, `judge`, `ci`) still
+strip unknown keys silently — the same footgun at lower stakes (e.g.
+`{"skeptic": {"concurency": 8}}` is a silent no-op). Sweep them in one pass,
+minding the `.default({})` wrappers, rather than piecemeal.

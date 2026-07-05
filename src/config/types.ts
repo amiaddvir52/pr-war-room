@@ -8,6 +8,7 @@ export type {
   AgentSpec,
   ReviewerBackend,
   ReviewerAngle,
+  PresetName,
   VerificationConfig,
   ReviewConfig,
   ContextConfig,

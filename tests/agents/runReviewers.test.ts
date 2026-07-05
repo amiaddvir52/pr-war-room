@@ -397,6 +397,29 @@ describe("runReviewers", () => {
     expect(names).toContain("claude_correctness_reviewer");
   });
 
+  it("default roster covers all seven review angles with cross-vendor duplicates (standard preset)", () => {
+    const roster = defaultConfig.agents.reviewers;
+    // Every name→backend→angle pairing is pinned (not just the preset-added
+    // agents): a swap between any two members must fail this test.
+    const expected: ReadonlyArray<readonly [string, string, string]> = [
+      ["claude_general_reviewer", "claude", "general"],
+      ["codex_general_reviewer", "codex", "general"],
+      ["claude_test_gap_reviewer", "claude", "test-gap"],
+      ["claude_correctness_reviewer", "claude", "correctness"],
+      ["claude_repo_pattern_reviewer", "claude", "repo-pattern"],
+      ["claude_security_reviewer", "claude", "security"],
+      ["claude_performance_reviewer", "claude", "performance"],
+      ["claude_product_intent_reviewer", "claude", "product-intent"],
+      ["codex_correctness_reviewer", "codex", "correctness"],
+      ["codex_security_reviewer", "codex", "security"],
+    ];
+    expect(roster.map((r) => [r.name, r.backend, r.angle])).toEqual(expected);
+    expect(roster.every((r) => r.enabled)).toBe(true);
+    // Three waves by default: concurrency stays below the roster size to bound
+    // simultaneous `claude` subprocesses (memory + one account's rate limits).
+    expect(defaultConfig.agents.concurrency).toBe(4);
+  });
+
   it("throws ReviewerError when every agent fails (after writing artifacts)", async () => {
     const paths = getArtifactPaths(dir);
     const reviewers: AgentSpec[] = [

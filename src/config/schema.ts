@@ -12,8 +12,9 @@ export const ReviewerBackendSchema = z.enum(REVIEWER_BACKENDS);
 
 /**
  * Review "angles" — the persona/focus a reviewer takes (Phase 6). `general` is
- * the broad reviewer; the rest are focused lenses (PRD §10.4). `security` and
- * `performance` are supported but not enabled by default.
+ * the broad reviewer; the rest are focused lenses (PRD §10.4). Every angle has
+ * a persona in `ANGLE_PROMPTS` (type-enforced); the default `standard` preset
+ * enables all of them (see presets.ts).
  */
 export const REVIEWER_ANGLES = [
   "general",
@@ -21,8 +22,31 @@ export const REVIEWER_ANGLES = [
   "correctness",
   "security",
   "performance",
+  "repo-pattern",
+  "product-intent",
 ] as const;
 export const ReviewerAngleSchema = z.enum(REVIEWER_ANGLES);
+
+/**
+ * Reviewer roster presets. A preset name expands into a concrete
+ * `agents.reviewers` roster (see presets.ts) inside `mergeConfig`, BEFORE
+ * validation — so the parsed config always carries the resolved roster, and an
+ * explicit `agents.reviewers` in the same config overrides preset members by
+ * name (or appends new agents).
+ */
+export const PRESET_NAMES = ["fast", "standard", "deep", "demo"] as const;
+export const PresetNameSchema = z.enum(PRESET_NAMES);
+
+/**
+ * Canonical identity key for a reviewer name. Names are compared
+ * case-insensitively everywhere — the roster uniqueness check below and the
+ * preset merge-by-name in presets.ts — because `name` becomes an artifact
+ * filename stem, and case-only-distinct names collide on case-insensitive
+ * filesystems. One function so the two rules cannot drift.
+ */
+export function reviewerNameKey(name: string): string {
+  return name.toLowerCase();
+}
 
 /**
  * One reviewer agent in the multi-agent fan-out (Phase 6). A reviewer is a
@@ -30,23 +54,37 @@ export const ReviewerAngleSchema = z.enum(REVIEWER_ANGLES);
  * prompt persona. `name` must be filesystem-safe — it becomes the artifact
  * filename stem (`raw/<name>_review.md`) and the finding-id prefix (`<name>-001`).
  */
-export const AgentSpecSchema = z.object({
-  name: z
-    .string()
-    .min(1)
-    .regex(/^[A-Za-z0-9_-]+$/, "must be filesystem-safe (letters, digits, '_' or '-')"),
-  backend: ReviewerBackendSchema,
-  angle: ReviewerAngleSchema.default("general"),
-  enabled: z.boolean().default(true),
-  // Per-agent timeout override; falls back to `agents.timeoutMs` when unset.
-  timeoutMs: z.number().int().positive().optional(),
-});
+export const AgentSpecSchema = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .regex(/^[A-Za-z0-9_-]+$/, "must be filesystem-safe (letters, digits, '_' or '-')"),
+    backend: ReviewerBackendSchema,
+    angle: ReviewerAngleSchema.default("general"),
+    enabled: z.boolean().default(true),
+    // Per-agent timeout override; falls back to `agents.timeoutMs` when unset.
+    timeoutMs: z.number().int().positive().optional(),
+  })
+  // Strict so a typo'd field key (`"enable"`, `"timeout"`) fails loudly instead
+  // of being stripped — under preset merge-by-name a silently stripped key
+  // would turn an intended override (e.g. a disable) into a no-op.
+  .strict();
 
 export const AgentsConfigSchema = z
   .object({
+    // Roster preset. Expanded into `reviewers` by `mergeConfig` before this
+    // schema runs (config/presets.ts); kept in the parsed config so
+    // run_metadata.json records which preset a run used. Unset when the roster
+    // was written out explicitly (or is the built-in default).
+    preset: PresetNameSchema.optional(),
     // The reviewer roster. Runs in parallel; disabled entries are skipped.
     reviewers: z.array(AgentSpecSchema).default([]),
     // Max reviewers running at once (each may spawn a subprocess / model call).
+    // Deliberately below the 10-agent `standard` roster (three waves): each
+    // `claude` reviewer is a full CLI subprocess holding the whole packet, and
+    // all of them share one account's rate limits — raise to 10 to run the
+    // standard roster in a single wave if your machine/limits absorb it.
     concurrency: z.number().int().positive().default(4),
     // Default per-agent timeout in ms (a hung reviewer is recorded, not fatal).
     timeoutMs: z.number().int().positive().default(300_000),
@@ -56,6 +94,10 @@ export const AgentsConfigSchema = z
     // (non-zero exit) instead of reporting a misleading clean review.
     minUsableReviewers: z.number().int().positive().default(1),
   })
+  // Strict so a typo'd key fails loudly: non-strict, `{"presets": "fast"}`
+  // would be silently stripped and the run would fall back to the full
+  // default roster — the opposite of what the user asked for.
+  .strict()
   .superRefine((agents, ctx) => {
     // `name` is the stem of each agent's `raw/<name>_*` artifacts and the prefix
     // of its finding ids, so names must be unique. Compare case-insensitively:
@@ -64,7 +106,7 @@ export const AgentsConfigSchema = z
     // agent's artifacts and minting colliding finding ids.
     const seen = new Map<string, string>();
     agents.reviewers.forEach((reviewer, index) => {
-      const key = reviewer.name.toLowerCase();
+      const key = reviewerNameKey(reviewer.name);
       const prior = seen.get(key);
       if (prior !== undefined) {
         const caseNote = prior === reviewer.name ? "" : ` (case-insensitively collides with "${prior}")`;
@@ -225,6 +267,7 @@ export const ConfigSchema = z
 
 export type ReviewerBackend = z.infer<typeof ReviewerBackendSchema>;
 export type ReviewerAngle = z.infer<typeof ReviewerAngleSchema>;
+export type PresetName = z.infer<typeof PresetNameSchema>;
 export type AgentSpec = z.infer<typeof AgentSpecSchema>;
 export type AgentsConfig = z.infer<typeof AgentsConfigSchema>;
 export type VerificationConfig = z.infer<typeof VerificationConfigSchema>;

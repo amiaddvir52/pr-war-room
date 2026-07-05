@@ -122,6 +122,32 @@ describe("deduplicateFindings", () => {
     expect(c.evidence).toEqual(expect.arrayContaining(["evidence from A", "evidence from B"]));
   });
 
+  it("merges the same issue across the original and preset-added reviewer angles", async () => {
+    // One underlying issue reported by an original agent and two of the agents
+    // added with the standard preset (repo-pattern / product-intent names).
+    const sources: ReadonlyArray<readonly [string, string]> = [
+      ["a-001", "claude_general_reviewer"],
+      ["b-001", "claude_repo_pattern_reviewer"],
+      ["c-001", "claude_product_intent_reviewer"],
+    ];
+    const members = sources.map(([id, agent]) =>
+      finding({
+        id,
+        source_agent: agent,
+        title: "config option added but never read",
+        claim: "the new config option is added but never read anywhere",
+      }),
+    );
+    const clusters = await deduplicateFindings(members, OPTS);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0]!.source_agents).toEqual([
+      "claude_general_reviewer",
+      "claude_product_intent_reviewer",
+      "claude_repo_pattern_reviewer",
+    ]);
+    expect(clusters[0]!.agreement).toBe(3);
+  });
+
   it("ignores file-level (0/0) members when computing a merged cluster's line range", async () => {
     // A file-level finding (0/0 sentinel) and a line-anchored finding for the
     // same issue must merge into a range at the real lines, not get dragged to 0.
