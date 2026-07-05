@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { runReviewers, isUsable } from "../../src/agents/runReviewers.js";
 import type { AgentRun } from "../../src/agents/runReviewers.js";
 import type { ModelClient } from "../../src/agents/types.js";
+import type { DetectBackend } from "../../src/agents/backendAvailability.js";
 import { getArtifactPaths } from "../../src/storage/artifactPaths.js";
 import { defaultConfig } from "../../src/config/defaultConfig.js";
 import type { AgentSpec, Config } from "../../src/config/types.js";
@@ -255,7 +256,8 @@ describe("runReviewers", () => {
     expect(byName(result.agents, "misleading").status).toBe("failed");
   });
 
-  it("skips disabled agents", async () => {
+  it("records disabled agents as skipped (visible), not silently omitted", async () => {
+    const paths = getArtifactPaths(dir);
     const reviewers: AgentSpec[] = [
       { name: "on", backend: "mock", angle: "general", enabled: true },
       { name: "off", backend: "mock", angle: "general", enabled: false },
@@ -264,10 +266,135 @@ describe("runReviewers", () => {
       packet,
       packetMarkdown: "# packet",
       config: configWith(reviewers),
-      paths: getArtifactPaths(dir),
+      paths,
       reporter: silentReporter(),
     });
-    expect(result.agents.map((a) => a.name)).toEqual(["on"]);
+    // Both configured agents appear; the disabled one is a visible skip, not omitted.
+    expect(result.agents.map((a) => a.name).sort()).toEqual(["off", "on"]);
+    const off = byName(result.agents, "off");
+    expect(off.status).toBe("skipped");
+    expect(off.error).toMatch(/disabled by config/);
+    expect(isUsable(off.status)).toBe(false);
+    expect(off.rawRef).toBeNull();
+    expect(byName(result.agents, "on").status).toBe("ok");
+    // The disabled agent contributed nothing, and it's recorded in agent_runs.json.
+    expect(result.findings.every((f) => f.source_agent !== "off")).toBe(true);
+    const runs = JSON.parse(await readFile(paths.raw.agentRuns, "utf8"));
+    expect(runs.agents.map((a: AgentRun) => a.name).sort()).toEqual(["off", "on"]);
+  });
+
+  it("runs a codex-backed reviewer when the codex backend is detected available", async () => {
+    const reviewers: AgentSpec[] = [
+      { name: "codex_general_reviewer", backend: "codex", angle: "general", enabled: true },
+    ];
+    const result = await runReviewers({
+      packet,
+      packetMarkdown: "# packet",
+      config: configWith(reviewers),
+      paths: getArtifactPaths(dir),
+      reporter: silentReporter(),
+      detectBackend: async () => ({ available: true }),
+      makeClient: () => findingClient("from codex"),
+    });
+    const codex = byName(result.agents, "codex_general_reviewer");
+    expect(codex.status).toBe("ok");
+    expect(codex.backend).toBe("codex");
+    expect(result.findings.some((f) => f.source_agent === "codex_general_reviewer")).toBe(true);
+  });
+
+  it("reports codex as skipped (not omitted) when unavailable, and keeps the other reviewers", async () => {
+    const paths = getArtifactPaths(dir);
+    const reviewers: AgentSpec[] = [
+      { name: "claude_general_reviewer", backend: "claude", angle: "general", enabled: true },
+      { name: "codex_general_reviewer", backend: "codex", angle: "general", enabled: true },
+    ];
+    const detectBackend: DetectBackend = async (backend) =>
+      backend === "codex"
+        ? { available: false, reason: "codex CLI not found on PATH" }
+        : { available: true };
+    const result = await runReviewers({
+      packet,
+      packetMarkdown: "# packet",
+      config: configWith(reviewers),
+      paths,
+      reporter: silentReporter(),
+      detectBackend,
+      makeClient: () => findingClient("real"), // only called for the claude agent
+    });
+
+    const codex = byName(result.agents, "codex_general_reviewer");
+    expect(codex.status).toBe("skipped");
+    expect(codex.error).toMatch(/codex CLI not found/);
+    expect(codex.rawRef).toBeNull();
+    expect(isUsable(codex.status)).toBe(false);
+    // Not silently omitted: present in the roster AND in agent_runs.json.
+    const runs = JSON.parse(await readFile(paths.raw.agentRuns, "utf8"));
+    expect(runs.agents.map((a: AgentRun) => a.name).sort()).toEqual([
+      "claude_general_reviewer",
+      "codex_general_reviewer",
+    ]);
+    // The claude reviewer still ran; the run succeeds on its strength.
+    expect(byName(result.agents, "claude_general_reviewer").status).toBe("ok");
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.source_agent).toBe("claude_general_reviewer");
+  });
+
+  it("detects each backend at most once, even across multiple agents sharing it", async () => {
+    const reviewers: AgentSpec[] = [
+      { name: "c1", backend: "claude", angle: "general", enabled: true },
+      { name: "c2", backend: "claude", angle: "correctness", enabled: true },
+      { name: "cx", backend: "codex", angle: "general", enabled: true },
+    ];
+    const probes: string[] = [];
+    await runReviewers({
+      packet,
+      packetMarkdown: "# packet",
+      config: configWith(reviewers),
+      paths: getArtifactPaths(dir),
+      reporter: silentReporter(),
+      detectBackend: async (backend) => {
+        probes.push(backend);
+        return { available: true };
+      },
+      makeClient: () => findingClient("x"),
+    });
+    // Two claude agents share one probe; codex is the second probe.
+    expect(probes.sort()).toEqual(["claude", "codex"]);
+  });
+
+  it("throws a clear error when every configured agent is skipped (none ran)", async () => {
+    const paths = getArtifactPaths(dir);
+    const reviewers: AgentSpec[] = [
+      { name: "codex_general_reviewer", backend: "codex", angle: "general", enabled: true },
+    ];
+    await expect(
+      runReviewers({
+        packet,
+        packetMarkdown: "# packet",
+        config: configWith(reviewers),
+        paths,
+        reporter: silentReporter(),
+        detectBackend: async () => ({ available: false, reason: "codex CLI not found on PATH" }),
+      }),
+    ).rejects.toThrow(/were skipped \(none ran\)/);
+    // The skip is still recorded for inspection.
+    const runs = JSON.parse(await readFile(paths.raw.agentRuns, "utf8"));
+    expect(runs.agents[0].status).toBe("skipped");
+    expect(runs.agents[0].error).toMatch(/codex CLI not found/);
+  });
+
+  it("default roster includes an independent codex_general_reviewer alongside the Claude agents", () => {
+    const roster = defaultConfig.agents.reviewers;
+    const names = roster.map((r) => r.name);
+    expect(names).toContain("codex_general_reviewer");
+    const codex = roster.find((r) => r.name === "codex_general_reviewer")!;
+    expect(codex.backend).toBe("codex");
+    expect(codex.angle).toBe("general");
+    expect(codex.enabled).toBe(true);
+    // Codex is added, the Claude reviewers are not removed.
+    expect(names).toContain("claude_general_reviewer");
+    expect(names).toContain("claude_test_gap_reviewer");
+    expect(names).toContain("claude_correctness_reviewer");
   });
 
   it("throws ReviewerError when every agent fails (after writing artifacts)", async () => {
@@ -403,6 +530,6 @@ describe("runReviewers usable-output policy", () => {
       run(reviewers, (spec) => (spec.name === "broken" ? unusableClient() : findingClient("real")), {
         minUsableReviewers: 2,
       }),
-    ).rejects.toThrow(/Only 1 of 2 reviewer agents produced usable output/);
+    ).rejects.toThrow(/Only 1 of 2 reviewer agents that ran produced usable output/);
   });
 });

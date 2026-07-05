@@ -50,8 +50,13 @@ we reuse the MCP's credential rather than driving MCP tools through the CLI.
 The reviewer roster is a list of agents under `agents.reviewers`, run in
 parallel. Each agent is a **backend × angle**: the `backend` picks the model
 client, the `angle` picks the review persona. If one agent fails, times out, or
-returns nothing, the run continues and records it — a per-run summary of which
-agents ran, failed, or timed out is written to `.ai-review/raw/agent_runs.json`.
+returns nothing, the run continues and records it. Every **configured** agent —
+including ones that never ran — appears in the terminal board and in
+`.ai-review/raw/agent_runs.json` with a status: `ok` / `no_findings` (usable),
+`unusable_output` / `failed` / `timeout` (ran, but produced nothing usable), or
+`skipped` (never ran — disabled by config, or its backend was detected
+unavailable). A `skipped` agent is a visible, benign skip, never silently
+omitted and never a hard failure.
 
 Backends:
 
@@ -62,17 +67,21 @@ Backends:
   `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`). This path gets structured
   outputs (schema-guaranteed JSON); the CLI paths validate prompt-guided JSON.
 - `"codex"` shells out to the **OpenAI Codex CLI** (`codex exec`), reusing your
-  `codex login`. It is **opt-in** (not in the default roster) for cross-model
-  independence; if the `codex` binary/auth is missing that agent is recorded as
-  failed with a diagnostic and the Claude-backed reviewers still run.
+  `codex login`, for genuine cross-vendor independence. It **is in the default
+  roster** but is **detection-gated**: the tool probes for the `codex` CLI first
+  and, if it isn't installed, records that agent as `skipped: codex CLI not found
+  on PATH` (visible, not omitted) while the Claude-backed reviewers still run. If
+  the CLI is present but auth/exec fails at run time, it's recorded as `failed`
+  and the run still continues. Install and `codex login` to activate it.
 - `"mock"` produces deterministic placeholder findings with no external call —
   handy for CI or a demo without any credentials.
 
 Angles: `general` (broad review), `test-gap`, `correctness`, `security`,
-`performance`. The default roster runs three Claude-backed agents —
-`general`, `test-gap`, and `correctness`; `security` and `performance` are
-supported opt-in angles. `judge.backend` selects the model the Phase-9 ranker
-runs on (see the `judge` config below).
+`performance`. The default roster runs four independent agents — a Claude
+`general`, `test-gap`, and `correctness` reviewer plus a **Codex `general`
+reviewer** (detection-gated, above); `security` and `performance` are supported
+opt-in angles. `judge.backend` selects the model the Phase-9 ranker runs on (see
+the `judge` config below).
 
 ## Requirements
 
@@ -132,6 +141,7 @@ the current directory, in which case it is deep-merged over the defaults
   "agents": {
     "reviewers": [
       { "name": "claude_general_reviewer", "backend": "claude", "angle": "general" },
+      { "name": "codex_general_reviewer", "backend": "codex", "angle": "general" },
       { "name": "claude_test_gap_reviewer", "backend": "claude", "angle": "test-gap" },
       { "name": "claude_correctness_reviewer", "backend": "claude", "angle": "correctness" }
     ],
@@ -176,18 +186,24 @@ the current directory, in which case it is deep-merged over the defaults
 ```
 
 `agents.reviewers` is the parallel reviewer roster (the array **replaces** the
-default when set). Each entry needs a filesystem-safe `name` (used for its
-`raw/<name>_*` artifacts and finding ids, so names must be unique — compared
-case-insensitively), a `backend`, and an `angle`; `enabled` (default `true`) and
-a per-agent `timeoutMs` override are optional. `agents.concurrency` caps how many
-run at once and `agents.timeoutMs` is the default per-agent timeout. Add a
-`{ "backend": "codex", … }` entry to bring in the opt-in cross-model reviewer.
+default when set — so to select reviewers you provide the full list you want).
+Each entry needs a filesystem-safe `name` (used for its `raw/<name>_*` artifacts
+and finding ids, so names must be unique — compared case-insensitively), a
+`backend`, and an `angle`; `enabled` and a per-agent `timeoutMs` override are
+optional. `agents.concurrency` caps how many run at once and `agents.timeoutMs`
+is the default per-agent timeout. To **force-enable / force-disable** a reviewer,
+set `"enabled": true`/`false` on its entry — the default Codex reviewer is
+enabled but only *runs* when the `codex` CLI is detected, so setting
+`"enabled": false` on it (or removing it) is how you turn Codex off explicitly; a
+disabled agent is reported as `skipped: disabled by config`, not hidden.
 
 `agents.minUsableReviewers` (default `1`) is the success threshold: the review
-succeeds only if at least this many reviewers return **usable** output (findings,
-or a valid empty result). A reviewer that refuses, times out, or emits
-unparseable output is *not* usable — a run where fewer than the threshold produce
-usable output exits non-zero rather than reporting a misleading clean review.
+succeeds only if at least this many reviewers that **ran** return **usable**
+output (findings, or a valid empty result). A reviewer that refuses, times out,
+or emits unparseable output is *not* usable; a `skipped` reviewer didn't run and
+so doesn't count toward the threshold. A run where fewer than the threshold
+produce usable output exits non-zero rather than reporting a misleading clean
+review.
 
 Stale `models.*` keys are rejected with an error pointing to their new home, so
 an upgraded config fails loudly instead of silently switching backends:

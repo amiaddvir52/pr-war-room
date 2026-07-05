@@ -181,5 +181,16 @@ describe("Reporter", () => {
       expect(text).toContain("agent_a — 1 finding");
       expect(text).not.toContain("should be ignored");
     });
+
+    it("renders a skipped row with a neutral marker, not a failure ✗", () => {
+      const { reporter, out } = capture();
+      const board = reporter.board([{ key: "cx", label: "codex_general_reviewer (general)" }]);
+      board.set("cx", "skipped", "codex CLI not found on PATH");
+      board.stop();
+      const text = out.join("\n");
+      expect(text).toContain("codex_general_reviewer (general) — codex CLI not found on PATH");
+      expect(text).toContain("⊘");
+      expect(text).not.toContain("✗");
+    });
   });
 });

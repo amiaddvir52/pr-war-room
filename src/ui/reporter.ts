@@ -59,6 +59,7 @@ const SYM = {
   ok: "✓",
   fail: "✗",
   warn: "⚠",
+  skip: "⊘",
 } as const;
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
@@ -81,8 +82,12 @@ export interface BoardItem {
   label: string;
 }
 
-/** A board row's lifecycle. `queued`/`running` animate; `ok`/`fail` are terminal. */
-export type BoardStatus = "queued" | "running" | "ok" | "fail";
+/**
+ * A board row's lifecycle. `queued`/`running` animate; `ok`/`fail`/`skipped` are
+ * terminal. `skipped` marks a row that never ran (disabled or backend
+ * unavailable) — a neutral, non-alarming state distinct from a failed run.
+ */
+export type BoardStatus = "queued" | "running" | "ok" | "fail" | "skipped";
 
 /**
  * A live multi-line status board (one row per item). On a TTY the rows animate
@@ -158,9 +163,17 @@ export class Reporter {
     this.print();
   }
 
-  /** A completed pipeline step, e.g. `› parsed PR URL      ✓`. */
-  step(label: string, ok = true): void {
-    const mark = ok ? this.c.green(SYM.ok) : this.c.red(SYM.fail);
+  /**
+   * A completed pipeline step, e.g. `› parsed PR URL      ✓`. `state` is `true`
+   * (✓), `false` (✗), or `"skipped"` for a neutral, non-alarming ⊘.
+   */
+  step(label: string, state: boolean | "skipped" = true): void {
+    const mark =
+      state === "skipped"
+        ? this.c.dim(SYM.skip)
+        : state
+          ? this.c.green(SYM.ok)
+          : this.c.red(SYM.fail);
     this.print(`  ${this.c.dim(SYM.step)} ${label.padEnd(24)} ${mark}`);
   }
 
@@ -267,13 +280,16 @@ export class Reporter {
     if (!this.canAnimate) {
       // No cursor control: print each row once when it reaches a terminal state,
       // in the `name — detail ✓/✗` shape the streaming steps already use.
+      const isTerminal = (s: BoardStatus): boolean =>
+        s === "ok" || s === "fail" || s === "skipped";
       return {
         set: (key, status, detail = "") => {
           const row = state.get(key);
-          if (!row || (status !== "ok" && status !== "fail")) return;
-          if (row.status === "ok" || row.status === "fail") return; // resolve once
+          if (!row || !isTerminal(status)) return;
+          if (isTerminal(row.status)) return; // resolve once
           row.status = status;
-          this.step(`${labels.get(key) ?? key} — ${detail}`, status === "ok");
+          const state3 = status === "ok" ? true : status === "skipped" ? "skipped" : false;
+          this.step(`${labels.get(key) ?? key} — ${detail}`, state3);
         },
         stop: () => {},
       };
@@ -299,15 +315,19 @@ export class Reporter {
           ? this.c.green(SYM.ok)
           : row.status === "fail"
             ? this.c.red(SYM.fail)
-            : row.status === "running"
-              ? this.c.cyan(SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!)
-              : this.c.dim("·");
+            : row.status === "skipped"
+              ? this.c.dim(SYM.skip)
+              : row.status === "running"
+                ? this.c.cyan(SPINNER_FRAMES[frame % SPINNER_FRAMES.length]!)
+                : this.c.dim("·");
       const suffix =
         row.status === "running"
           ? this.c.dim(`running ${elapsed(now - (row.startedAt ?? now))}…`)
           : row.status === "queued"
             ? this.c.dim("queued")
-            : row.detail;
+            : row.status === "skipped"
+              ? this.c.dim(row.detail)
+              : row.detail;
       return `    ${mark} ${fitLabel(it.label)}  ${suffix}`;
     };
 
