@@ -6,7 +6,8 @@ import { runReview } from "../../src/cli/commands/review.js";
 import type { PrepareWorkspaceFn, BuildReviewPacketFn } from "../../src/cli/commands/review.js";
 import type { RunReviewers, RunReviewersInput } from "../../src/agents/runReviewers.js";
 import type { RunSkeptic, RunSkepticInput } from "../../src/agents/runSkeptic.js";
-import type { SkepticResult } from "../../src/findings/schema.js";
+import type { RunJudge, RunJudgeInput } from "../../src/agents/runJudge.js";
+import type { JudgeResult, SkepticResult } from "../../src/findings/schema.js";
 import type { Finding } from "../../src/findings/schema.js";
 import { PrUrlError, GitHubError, ReviewerError } from "../../src/errors.js";
 import { CONFIG_FILENAME } from "../../src/config/loadConfig.js";
@@ -164,6 +165,16 @@ function capturingSkeptic(results: SkepticResult[] = []): { fn: RunSkeptic; call
 }
 const fakeSkeptic = (): RunSkeptic => capturingSkeptic().fn;
 
+function capturingJudge(ranked: JudgeResult[] = []): { fn: RunJudge; calls: RunJudgeInput[] } {
+  const calls: RunJudgeInput[] = [];
+  const fn: RunJudge = async (input) => {
+    calls.push(input);
+    return { ranked };
+  };
+  return { fn, calls };
+}
+const fakeJudge = (): RunJudge => capturingJudge().fn;
+
 /** Common injected fakes for the whole pipeline (Phases 1–5). */
 function fakes(extra: Partial<Parameters<typeof runReview>[1]> = {}) {
   return {
@@ -174,6 +185,7 @@ function fakes(extra: Partial<Parameters<typeof runReview>[1]> = {}) {
     buildReviewPacket: fakeBuildPacket(),
     runReviewers: fakeReviewer(),
     skeptic: fakeSkeptic(),
+    judge: fakeJudge(),
     ...extra,
   };
 }
@@ -353,6 +365,116 @@ describe("runReview (integration)", () => {
     await expect(stat(join(dir, ".ai-review", "skeptic", "skeptic_results.json"))).rejects.toThrow();
   });
 
+  it("ranks the supported clusters and writes ranked_findings.json + final_findings.json (Phase 9)", async () => {
+    const oneFinding: RunReviewers = async () => ({
+      findings: [
+        {
+          id: "a-001",
+          source_agent: "reviewer_a",
+          raw_agent_output_ref: "raw/a.md",
+          title: "possible crash",
+          category: "correctness",
+          severity: "high",
+          confidence: 0.7,
+          file: "src/x.ts",
+          line_start: 10,
+          line_end: 12,
+          claim: "possible crash",
+          evidence: ["line 10 dereferences user.profile"],
+          suggested_fix: null,
+          suggested_test: null,
+          human_review_likelihood: 0.8,
+          needs_code_change: true,
+        },
+      ],
+      agents: [],
+    });
+    // The single finding dedups into cluster-001; the skeptic keeps it (empty
+    // results ⇒ recall-first keep). The judge classifies it a blocker.
+    const rankedResult: JudgeResult = {
+      cluster_id: "cluster-001",
+      source: "llm",
+      model_verdict: { final_classification: "blocker", model_score: 0.9, reasoning_summary: "crash path" },
+      decision: {
+        classification: "blocker",
+        score: 0.88,
+        include_in_main_report: true,
+        reason: "crash path",
+        softened_from_model_classification: null,
+      },
+      failure: null,
+    };
+    const jg = capturingJudge([rankedResult]);
+    await runReview(
+      "https://github.com/org/repo/pull/123",
+      fakes({ cwd: dir, runReviewers: oneFinding, judge: jg.fn }),
+    );
+
+    // The judge received the supported candidate cluster.
+    expect(jg.calls).toHaveLength(1);
+    expect(jg.calls[0]?.clusters.map((c) => c.cluster_id)).toEqual(["cluster-001"]);
+
+    const ranked = JSON.parse(
+      await readFile(join(dir, ".ai-review", "judge", "ranked_findings.json"), "utf8"),
+    ) as JudgeResult[];
+    expect(ranked).toHaveLength(1);
+    expect(ranked[0]?.decision.classification).toBe("blocker");
+
+    // final_findings.json is the report-ready join: the cluster enriched with the
+    // judge's classification/score (drops would be excluded — none here).
+    const final = JSON.parse(
+      await readFile(join(dir, ".ai-review", "final_findings.json"), "utf8"),
+    ) as Array<{ cluster_id: string; final_classification: string; final_score: number; claim: string }>;
+    expect(final).toHaveLength(1);
+    expect(final[0]?.cluster_id).toBe("cluster-001");
+    expect(final[0]?.final_classification).toBe("blocker");
+    expect(final[0]?.final_score).toBe(0.88);
+    expect(final[0]?.claim).toBe("possible crash");
+
+    // Phase 10 — the report renders the blocker under Must Fix.
+    const report = await readFile(join(dir, ".ai-review", "report.md"), "utf8");
+    expect(report).toContain("# AI Pre-Review Report");
+    expect(report).toContain("## Must Fix Before Human Review");
+    expect(report).toContain("### possible crash");
+    expect(report).toContain("Not ready — 1 blocker");
+  });
+
+  it("skips the judge phase and writes no judge artifacts when disabled", async () => {
+    await writeFile(join(dir, CONFIG_FILENAME), JSON.stringify({ judge: { enabled: false } }), "utf8");
+    const jg = capturingJudge();
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, judge: jg.fn }));
+    expect(jg.calls).toHaveLength(0);
+    await expect(stat(join(dir, ".ai-review", "judge", "ranked_findings.json"))).rejects.toThrow();
+    await expect(stat(join(dir, ".ai-review", "final_findings.json"))).rejects.toThrow();
+
+    // Phase 10 — the report is still written and degrades (no final_findings link).
+    const report = await readFile(join(dir, ".ai-review", "report.md"), "utf8");
+    expect(report).toContain("# AI Pre-Review Report");
+    expect(report).not.toContain("(final_findings.json)");
+    expect(report).not.toContain("(judge/ranked_findings.json)");
+  });
+
+  it("writes report.md with the core sections and a ready verdict when empty (Phase 10)", async () => {
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir }));
+    const report = await readFile(join(dir, ".ai-review", "report.md"), "utf8");
+    expect(report).toContain("# AI Pre-Review Report");
+    expect(report).toContain("## Summary");
+    expect(report).toContain("## Verification Results");
+    expect(report).toContain("## Raw Artifacts");
+    expect(report).toContain("Looks ready for human review");
+    expect(report).toContain("reviewers surfaced no findings");
+    expect(report.endsWith("\n")).toBe(true);
+  });
+
+  it("writes a report.md that degrades when the skeptic is disabled (Phase 10)", async () => {
+    await writeFile(join(dir, CONFIG_FILENAME), JSON.stringify({ skeptic: { enabled: false } }), "utf8");
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir }));
+    const report = await readFile(join(dir, ".ai-review", "report.md"), "utf8");
+    expect(report).toContain("# AI Pre-Review Report");
+    expect(report).not.toContain("after skeptic");
+    expect(report).not.toContain("(skeptic/skeptic_results.json)");
+  });
+
   it("propagates a ReviewerError raised by the reviewer fan-out", async () => {
     const failing: RunReviewers = async () => {
       throw new ReviewerError("all reviewer agents failed");
@@ -368,6 +490,7 @@ describe("runReview (integration)", () => {
       JSON.stringify({
         agents: { reviewers: [{ name: "mock", backend: "mock" }] },
         skeptic: { backend: "mock" },
+        judge: { backend: "mock" },
       }),
       "utf8",
     );
@@ -424,6 +547,25 @@ describe("runReview (integration)", () => {
     expect(skeptic).toHaveLength(clusters.length);
     expect(skeptic.every((r) => r.source === "deterministic")).toBe(true);
     expect(skeptic.every((r) => r.decision.action === "keep")).toBe(true);
+
+    // Phase 9 — the real judge ran with the mock backend (deterministic). Every
+    // supported cluster is ranked; the mock finding severities (medium/low) never
+    // classify as "drop", so all appear in final_findings.json.
+    const ranked = JSON.parse(
+      await readFile(join(dir, ".ai-review", "judge", "ranked_findings.json"), "utf8"),
+    ) as JudgeResult[];
+    expect(ranked).toHaveLength(clusters.length);
+    expect(ranked.every((r) => r.source === "deterministic")).toBe(true);
+
+    const final = JSON.parse(
+      await readFile(join(dir, ".ai-review", "final_findings.json"), "utf8"),
+    ) as Array<{ cluster_id: string; final_classification: string; final_score: number }>;
+    expect(final).toHaveLength(clusters.length);
+    expect(final.every((f) => f.final_classification !== "drop")).toBe(true);
+    // Sorted most-important-first: scores are non-increasing.
+    for (let i = 1; i < final.length; i++) {
+      expect(final[i - 1]!.final_score).toBeGreaterThanOrEqual(final[i]!.final_score);
+    }
   });
 
   it("propagates a GitHubError raised during ingestion", async () => {

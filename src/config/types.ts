@@ -8,11 +8,11 @@ export type {
   AgentSpec,
   ReviewerBackend,
   ReviewerAngle,
-  ModelsConfig,
   VerificationConfig,
   ReviewConfig,
   ContextConfig,
   DedupConfig,
   SkepticConfig,
+  JudgeConfig,
   CiConfig,
 } from "./schema.js";

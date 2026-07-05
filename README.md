@@ -13,7 +13,7 @@ patches.
 
 ## Status
 
-This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–8** are
+This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–10** are
 implemented: the CLI skeleton, configuration system, PR-URL parsing, the
 `.ai-review/` artifact layout, **GitHub PR ingestion** (metadata, changed files,
 and diff), the **local workspace** (a shallow checkout of the PR head with
@@ -28,8 +28,17 @@ different agents are clustered into one issue each (singletons included), so
 later phases see a de-duplicated set — then **evidence-validated by a skeptic**:
 each cluster is challenged with deterministic file/line/diff checks and (unless
 disabled) an LLM skeptic that tries to disprove it, so unsupported findings are
-dropped from the candidate list and only survivors move on. The judge step and
-report generation arrive next.
+dropped from the candidate list and only survivors move on — then **ranked by an
+LLM-as-a-judge**: each supported cluster is classified (`blocker`,
+`should_fix_before_review`, `nice_to_have`, or `drop`) and given a deterministic
+priority score, producing `judge/ranked_findings.json` (the full record,
+including drops and why) and `final_findings.json` (the report-ready subset) —
+and finally a **concise Markdown report** (`report.md`): findings grouped
+must-fix / should-fix / optional with their evidence and suggested fixes, a
+readiness verdict, the review funnel (raw → clustered → skeptic → ranked, with
+the dropped count), verification results, and links to the raw artifacts. It
+honours `review.maxFindings` / `review.includeNiceToHave` and degrades cleanly
+when the skeptic or judge is disabled.
 
 GitHub access uses `GITHUB_TOKEN` if set, otherwise `GH_TOKEN`, otherwise
 `GITHUB_PERSONAL_ACCESS_TOKEN` (the same token the GitHub MCP server uses, so if
@@ -62,7 +71,8 @@ Backends:
 Angles: `general` (broad review), `test-gap`, `correctness`, `security`,
 `performance`. The default roster runs three Claude-backed agents —
 `general`, `test-gap`, and `correctness`; `security` and `performance` are
-supported opt-in angles. `models.judge` selects the ranker used in a later phase.
+supported opt-in angles. `judge.backend` selects the model the Phase-9 ranker
+runs on (see the `judge` config below).
 
 ## Requirements
 
@@ -98,8 +108,12 @@ the PR head), `workspace/workspace_metadata.json`, and
 `raw/<agent>_review.md` (verbatim model output) and `raw/<agent>_findings.json` (that
 agent's validated findings) **per agent**, `raw/agent_runs.json` (which agents ran,
 failed, or timed out), `normalized/all_findings.json` (every agent's findings merged
-and normalized), and `deduped/finding_clusters.json` (those findings merged into one
-cluster per underlying issue — the input to later phases).
+and normalized), `deduped/finding_clusters.json` (those findings merged into one
+cluster per underlying issue), `skeptic/skeptic_results.json` (each cluster's
+evidence-validation verdict), `judge/ranked_findings.json` (each supported
+cluster's classification + priority score, drops included with their reason),
+`final_findings.json` (the report-ready, non-dropped subset, most-important-first),
+and `report.md` (the concise, human-facing Markdown report).
 
 Verification is **opt-in**: detection always runs, but commands only execute with
 `--verify` (or `verification.enabled: true`). This matters because running a PR's
@@ -125,9 +139,6 @@ the current directory, in which case it is deep-merged over the defaults
     "timeoutMs": 300000,
     "minUsableReviewers": 1
   },
-  "models": {
-    "judge": "claude"
-  },
   "verification": {
     "commands": [],
     "enabled": false,
@@ -148,6 +159,18 @@ the current directory, in which case it is deep-merged over the defaults
     "mergeThreshold": 0.6,
     "candidateThreshold": 0.4,
     "llm": { "enabled": false, "backend": "claude", "timeoutMs": 60000 }
+  },
+  "skeptic": {
+    "enabled": true,
+    "backend": "claude",
+    "concurrency": 4,
+    "timeoutMs": 60000
+  },
+  "judge": {
+    "enabled": true,
+    "backend": "claude",
+    "concurrency": 4,
+    "timeoutMs": 60000
   }
 }
 ```
@@ -166,9 +189,10 @@ or a valid empty result). A reviewer that refuses, times out, or emits
 unparseable output is *not* usable — a run where fewer than the threshold produce
 usable output exits non-zero rather than reporting a misleading clean review.
 
-Stale pre-Phase-6 keys (`models.primaryReviewer` / `models.secondaryReviewer`)
-are rejected with an error pointing here, so an upgraded config fails loudly
-instead of silently switching backends.
+Stale `models.*` keys are rejected with an error pointing to their new home, so
+an upgraded config fails loudly instead of silently switching backends:
+`models.primaryReviewer` / `models.secondaryReviewer` moved to `agents.reviewers`
+(Phase 6), and `models.judge` moved to `judge.backend` (Phase 9).
 
 `context.maxPacketBytes` soft-caps the review packet (largest patches are trimmed
 with a warning if exceeded); `context.nearbyContextLines` sets how much
@@ -206,6 +230,23 @@ If the skeptic can't run (timeout / refusal / parse failure / construction
 failure / unexpected error), the finding is kept and the failure is recorded —
 never silently swallowed, and never aborts the run. `concurrency` bounds
 parallel calls; `timeoutMs` bounds each.
+
+`judge` (Phase 9) controls the LLM-as-a-judge ranker. It is **on by default**
+(`judge.enabled: true`, `backend: "claude"`) and runs on every skeptic-supported
+cluster, classifying each as `blocker`, `should_fix_before_review`,
+`nice_to_have`, or `drop`. The skeptic already decided whether a finding is
+*real*; the judge decides whether a human reviewer would *care*, so it may drop
+low-value/stylistic findings — but the **ordering score is computed
+deterministically** (from severity, skeptic support, independent-reviewer
+agreement, confidence, and human-review likelihood), not taken from the model, so
+the ranking is reproducible; the model's advisory self-score is kept in
+`ranked_findings.json` for the audit trail. Dropping is **recall-guarded**: a
+model `drop` on a well-supported, high-severity (or independently-reported)
+finding is softened to a kept `nice_to_have`. Set `backend: "mock"` to rank
+deterministically with no model call (offline / CI / demo); if the judge can't
+run for a cluster it is classified deterministically and kept, never dropped.
+`ranked_findings.json` holds every cluster (drops included, with reasons);
+`final_findings.json` holds the non-dropped subset, most-important-first.
 
 ## Development
 

@@ -1,6 +1,6 @@
-import type { PacketVerification, ReviewPacket } from "../../context/types.js";
-import { findChangedFile } from "../../findings/evidenceChecks.js";
+import type { ReviewPacket } from "../../context/types.js";
 import type { EvidenceChecks, FindingCluster } from "../../findings/schema.js";
+import { renderCluster, renderFocusFile, renderVerification } from "./renderContext.js";
 
 /**
  * Prompt for the skeptic (Phase 8, PRD §10.7). The skeptic's job is to try to
@@ -47,48 +47,6 @@ export function buildSkepticSystemPrompt(): string {
   ].join("\n");
 }
 
-function renderCluster(cluster: FindingCluster): string {
-  const lines =
-    cluster.line_start === 0 && cluster.line_end === 0
-      ? "file-level (no line range)"
-      : `lines ${cluster.line_start}-${cluster.line_end}`;
-  const evidence = cluster.evidence.map((e) => `  - ${e}`).join("\n");
-  return [
-    `Title: ${cluster.merged_title}`,
-    `Category: ${cluster.category}`,
-    `Severity: ${cluster.severity}`,
-    `File: ${cluster.file ?? "(none)"} (${lines})`,
-    `Reported by ${cluster.agreement} independent reviewer(s): ${cluster.source_agents.join(", ")}`,
-    `Claim: ${cluster.claim}`,
-    "Evidence the reviewers cited:",
-    evidence,
-    `Suggested fix: ${cluster.suggested_fix ?? "(none)"}`,
-  ].join("\n");
-}
-
-/** Render only the changed file the finding points at, to keep the prompt focused. */
-function renderFocusFile(cluster: FindingCluster, packet: ReviewPacket): string {
-  if (cluster.file === null) {
-    return "This is a file-level finding with no specific file. Use the PR context to judge it.";
-  }
-  // Reuse the deterministic file matcher so the rendered evidence can't drift
-  // from the `file_in_changeset` signal the gate acts on.
-  const file = findChangedFile(cluster.file, packet);
-  if (file === undefined) {
-    return `The referenced file "${cluster.file}" is NOT among the PR's changed files.`;
-  }
-  const parts = [`File: ${file.path} (status: ${file.status}, +${file.additions}/-${file.deletions})`];
-  if (file.patch !== null && !file.patchOmitted) {
-    parts.push("Diff:", "```diff", file.patch, "```");
-  } else {
-    parts.push("(Diff omitted — binary or too large.)");
-  }
-  if (file.nearbyContext !== null) {
-    parts.push("Nearby code (line-numbered):", "```", file.nearbyContext, "```");
-  }
-  return parts.join("\n");
-}
-
 function renderChecks(checks: EvidenceChecks): string {
   const flag = (b: boolean | null): string => (b === null ? "n/a" : b ? "yes" : "NO");
   const lines = [
@@ -102,13 +60,6 @@ function renderChecks(checks: EvidenceChecks): string {
   for (const w of checks.soft_warnings) lines.push(`  warning (${w.code}): ${w.message}`);
   for (const n of checks.notes) lines.push(`  note: ${n}`);
   return lines.join("\n");
-}
-
-function renderVerification(verification: PacketVerification): string {
-  if (!verification.ran) return "Verification: not run.";
-  const failed = verification.commands.filter((c) => !c.passed).map((c) => c.command);
-  if (verification.allPassed) return "Verification: all configured commands passed.";
-  return `Verification: some commands FAILED: ${failed.join(", ") || "(see packet)"}.`;
 }
 
 export function buildSkepticUserPrompt(

@@ -1,4 +1,4 @@
-import type { SkepticFailureKind } from "./findings/schema.js";
+import type { JudgeFailureKind, SkepticFailureKind } from "./findings/schema.js";
 
 /**
  * Typed CLI errors. Each carries an `exitCode` so the top-level error boundary
@@ -80,6 +80,23 @@ export class SkepticError extends ReviewerError {
   constructor(message: string, kind: SkepticFailureKind) {
     super(message);
     this.name = "SkepticError";
+    this.kind = kind;
+  }
+}
+
+/**
+ * A soft judge failure (refusal / truncation / backend error / unparseable
+ * verdict), mirroring `SkepticError`. A subclass of `ReviewerError` so existing
+ * `instanceof ReviewerError` handling still applies, with a structured `kind` so
+ * `runJudge` can classify the finding deterministically (recall-first) without
+ * matching on message text. `timeout` failures flow through `ReviewerTimeoutError`.
+ */
+export class JudgeError extends ReviewerError {
+  readonly kind: JudgeFailureKind;
+
+  constructor(message: string, kind: JudgeFailureKind) {
+    super(message);
+    this.name = "JudgeError";
     this.kind = kind;
   }
 }

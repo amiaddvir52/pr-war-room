@@ -344,3 +344,129 @@ export const SKEPTIC_OUTPUT_JSON_SCHEMA: Record<string, unknown> = {
     recommended_action: { type: "string", enum: [...RECOMMENDED_ACTIONS] },
   },
 };
+
+/**
+ * Judge / LLM-as-a-judge ranking schema (PRD §10.8 / Phase 9). The judge takes
+ * each skeptic-supported cluster and classifies it by practical usefulness and
+ * likelihood of a human review comment. It follows the exact same
+ * raw-verdict / authoritative-decision split as the skeptic:
+ *   - `JudgeVerdict`   — the RAW fields the judge model returns (its opinion,
+ *                        incl. an advisory `model_score` we keep for audit).
+ *   - `JudgeDecision`  — the FINAL, authoritative decision (classification +
+ *                        deterministic score + report inclusion) the phase acts
+ *                        on. Ordering-critical values (`score`) are computed
+ *                        deterministically, not taken from the model, so the
+ *                        ranking is reproducible and explainable.
+ *
+ * Division of labour: the skeptic decided *support* (is the finding real?); the
+ * judge decides *value/priority* (would a human reviewer care?). The judge may
+ * drop low-value/stylistic findings, but a recall-first guard in `runJudge`
+ * prevents it from silently dropping well-supported high-severity ones.
+ */
+export const JUDGE_CLASSIFICATIONS = [
+  "blocker",
+  "should_fix_before_review",
+  "nice_to_have",
+  "drop",
+] as const;
+export const JudgeClassificationSchema = z.enum(JUDGE_CLASSIFICATIONS);
+export type JudgeClassification = z.infer<typeof JudgeClassificationSchema>;
+
+/** The judge model's raw verdict for one cluster (advisory input, not the decision). */
+export const JudgeVerdictSchema = z.object({
+  final_classification: JudgeClassificationSchema,
+  // The model's self-assessed usefulness score. Advisory only — the authoritative
+  // `final_score` is computed deterministically (see `scoreFindings`), so ordering
+  // is reproducible. Kept here purely for the audit trail. Range re-checked by Zod.
+  model_score: z.number().min(0).max(1),
+  reasoning_summary: z.string(),
+});
+export type JudgeVerdict = z.infer<typeof JudgeVerdictSchema>;
+
+/**
+ * The final, authoritative decision for a cluster. `classification` is what the
+ * report groups by; `score` is the deterministic composite that orders findings
+ * within a group; `include_in_main_report` is `classification !== "drop"`.
+ * `softened_from_model_classification` records when an over-eager model `drop`
+ * was softened to `nice_to_have` for recall, so the audit trail is explicit.
+ */
+export const JudgeDecisionSchema = z.object({
+  classification: JudgeClassificationSchema,
+  score: z.number().min(0).max(1),
+  include_in_main_report: z.boolean(),
+  reason: z.string(),
+  softened_from_model_classification: JudgeClassificationSchema.nullable(),
+});
+export type JudgeDecision = z.infer<typeof JudgeDecisionSchema>;
+
+/**
+ * Why the judge could not produce a model verdict for a cluster. Same vocabulary
+ * as the skeptic's failure kinds; recorded (not swallowed) so a fallback-keep is
+ * auditable. `unexpected` marks a programming error, surfaced rather than
+ * disguised as a benign infra hiccup.
+ */
+export const JUDGE_FAILURE_KINDS = SKEPTIC_FAILURE_KINDS;
+export const JudgeFailureKindSchema = z.enum(JUDGE_FAILURE_KINDS);
+export type JudgeFailureKind = z.infer<typeof JudgeFailureKindSchema>;
+
+export const JudgeFailureSchema = z.object({
+  kind: JudgeFailureKindSchema,
+  message: z.string(),
+});
+export type JudgeFailure = z.infer<typeof JudgeFailureSchema>;
+
+/**
+ * How the final judge decision was reached:
+ *   - `llm`           — the judge model classified it (possibly recall-softened).
+ *   - `deterministic` — classified by the scoring rules alone (mock backend or
+ *                       `judge.enabled` with no model, i.e. the offline path).
+ *   - `fallback`      — the judge could not run (see `failure`); classified
+ *                       deterministically and kept pending review.
+ */
+export const JUDGE_SOURCES = ["llm", "deterministic", "fallback"] as const;
+export const JudgeSourceSchema = z.enum(JUDGE_SOURCES);
+export type JudgeSource = z.infer<typeof JudgeSourceSchema>;
+
+/** The per-cluster record written to `judge/ranked_findings.json`. */
+export const JudgeResultSchema = z.object({
+  cluster_id: z.string(),
+  source: JudgeSourceSchema,
+  // The raw model verdict, or null when no model ran (mock / disabled / failure).
+  // Kept separate from `decision` so the two never contradict each other.
+  model_verdict: JudgeVerdictSchema.nullable(),
+  decision: JudgeDecisionSchema,
+  // Non-null only when the judge could not complete for this cluster.
+  failure: JudgeFailureSchema.nullable(),
+});
+export type JudgeResult = z.infer<typeof JudgeResultSchema>;
+
+/**
+ * A report-ready finding written to `final_findings.json`: the full merged
+ * cluster plus the judge's authoritative classification/score/reasoning and the
+ * skeptic's support level. Self-contained so Phase 10 (report) and Phase 11 (fix)
+ * read a single file. Dropped clusters are excluded from this array (they remain
+ * in `ranked_findings.json` with their reasons for the report's dropped-count).
+ */
+export const FinalFindingSchema = FindingClusterSchema.extend({
+  final_classification: JudgeClassificationSchema,
+  final_score: z.number().min(0).max(1),
+  judge_reasoning: z.string(),
+  skeptic_support_level: SupportLevelSchema.nullable(),
+});
+export type FinalFinding = z.infer<typeof FinalFindingSchema>;
+
+/**
+ * Structured-output JSON Schema for the judge verdict. Same convention as
+ * `SKEPTIC_OUTPUT_JSON_SCHEMA`: closed object, every property required, enums
+ * inlined; the numeric range on `model_score` is re-checked by `JudgeVerdictSchema`.
+ */
+export const JUDGE_OUTPUT_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["final_classification", "model_score", "reasoning_summary"],
+  properties: {
+    final_classification: { type: "string", enum: [...JUDGE_CLASSIFICATIONS] },
+    model_score: { type: "number" },
+    reasoning_summary: { type: "string" },
+  },
+};

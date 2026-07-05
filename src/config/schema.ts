@@ -81,19 +81,23 @@ export const AgentsConfigSchema = z
     });
   });
 
+/**
+ * Deprecated `models` block. Every key it ever held has moved to a dedicated,
+ * validated home:
+ *   - `models.judge` → `judge.backend` (Phase 9)
+ *   - `models.primaryReviewer` / `models.secondaryReviewer` → `agents.reviewers`
+ *     (Phase 6)
+ * It now accepts no keys, so any `models.*` in a config fails loudly with a
+ * pointer to the new home rather than being silently ignored (which would have
+ * swapped a user's judge/reviewer backend without warning). The block is
+ * optional — a config that has already migrated simply omits it.
+ */
 export const ModelsConfigSchema = z
-  .object({
-    // The reviewer roster moved to `agents.reviewers` (Phase 6). `judge` stays a
-    // free string here for the Phase 9 LLM-as-a-judge step.
-    judge: z.string(),
-  })
-  // Reject stale keys loudly. Pre-Phase-6 configs set `models.primaryReviewer` /
-  // `models.secondaryReviewer`; silently stripping them would swap a user's
-  // reviewer backend without warning, so fail with a pointer to the new home.
+  .object({})
   .strict(
-    "unknown key in `models` — the reviewer roster moved to `agents.reviewers` in Phase 6. " +
-      "Remove `primaryReviewer` / `secondaryReviewer` and configure reviewers under " +
-      "`agents.reviewers` instead.",
+    "unknown key in `models` — `models.judge` moved to `judge.backend` (Phase 9) and the " +
+      "reviewer roster moved to `agents.reviewers` (Phase 6). Configure the judge under `judge` " +
+      "and reviewers under `agents.reviewers`, then remove the `models` block.",
   );
 
 export const VerificationConfigSchema = z.object({
@@ -173,6 +177,25 @@ export const SkepticConfigSchema = z
   .default({});
 
 /**
+ * Judge / LLM-as-a-judge ranking (Phase 9, PRD §10.8). Mirrors the skeptic: ON
+ * by default (the ranker that produces the report input), on the same `claude`
+ * backend as the reviewers. A `mock` backend ranks deterministically from
+ * severity/support/agreement with no model call (offline / CI / demo). The
+ * `backend` field replaces the old free-string `models.judge`.
+ */
+export const JudgeConfigSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    backend: ReviewerBackendSchema.default("claude"),
+    // Max clusters ranked at once (each may spawn a subprocess / model call).
+    concurrency: z.number().int().positive().default(4),
+    // Per-cluster timeout in ms. A judge that hangs is recorded and the finding
+    // is classified deterministically and kept (recall-first), never dropped.
+    timeoutMs: z.number().int().positive().default(60_000),
+  })
+  .default({});
+
+/**
  * CI options are pre-declared (optional/inert) so a config can already set them
  * and Phase 15 can activate them without breaking existing configs.
  */
@@ -186,12 +209,15 @@ export const CiConfigSchema = z
 export const ConfigSchema = z
   .object({
     agents: AgentsConfigSchema,
-    models: ModelsConfigSchema,
+    // Deprecated (see `ModelsConfigSchema`): optional so a migrated config omits
+    // it, but any `models.*` key still fails loudly with a pointer to its new home.
+    models: ModelsConfigSchema.optional(),
     verification: VerificationConfigSchema,
     review: ReviewConfigSchema,
     context: ContextConfigSchema.default({}),
     dedup: DedupConfigSchema,
     skeptic: SkepticConfigSchema,
+    judge: JudgeConfigSchema,
     ci: CiConfigSchema.optional(),
   })
   // Reject unknown top-level keys so typos in a user config fail loudly.
@@ -201,11 +227,11 @@ export type ReviewerBackend = z.infer<typeof ReviewerBackendSchema>;
 export type ReviewerAngle = z.infer<typeof ReviewerAngleSchema>;
 export type AgentSpec = z.infer<typeof AgentSpecSchema>;
 export type AgentsConfig = z.infer<typeof AgentsConfigSchema>;
-export type ModelsConfig = z.infer<typeof ModelsConfigSchema>;
 export type VerificationConfig = z.infer<typeof VerificationConfigSchema>;
 export type ReviewConfig = z.infer<typeof ReviewConfigSchema>;
 export type ContextConfig = z.infer<typeof ContextConfigSchema>;
 export type DedupConfig = z.infer<typeof DedupConfigSchema>;
 export type SkepticConfig = z.infer<typeof SkepticConfigSchema>;
+export type JudgeConfig = z.infer<typeof JudgeConfigSchema>;
 export type CiConfig = z.infer<typeof CiConfigSchema>;
 export type Config = z.infer<typeof ConfigSchema>;

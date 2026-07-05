@@ -24,9 +24,6 @@ export const defaultConfig: Config = {
     timeoutMs: 300_000,
     minUsableReviewers: 1,
   },
-  models: {
-    judge: "claude",
-  },
   verification: {
     // Empty by default so Phase 3's detection drives which commands run; set
     // commands here to override detection. `enabled: false` means detect-only —
@@ -61,6 +58,14 @@ export const defaultConfig: Config = {
   // deterministic checks always run, the LLM skeptic runs on `claude` unless the
   // backend is `mock`.
   skeptic: {
+    enabled: true,
+    backend: "claude",
+    concurrency: 4,
+    timeoutMs: 60_000,
+  },
+  // Phase 9 — LLM-as-a-judge ranking. ON by default (produces the report input),
+  // on `claude` unless the backend is `mock` (which ranks deterministically).
+  judge: {
     enabled: true,
     backend: "claude",
     concurrency: 4,

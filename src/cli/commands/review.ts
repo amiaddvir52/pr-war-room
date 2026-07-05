@@ -20,6 +20,17 @@ import { deduplicateFindings } from "../../findings/deduplicateFindings.js";
 import { createDedupAdjudicator } from "../../agents/DedupAdjudicator.js";
 import { runSkeptic, selectSupportedClusters } from "../../agents/runSkeptic.js";
 import type { RunSkeptic } from "../../agents/runSkeptic.js";
+import { runJudge } from "../../agents/runJudge.js";
+import type { RunJudge } from "../../agents/runJudge.js";
+import { selectFinalFindings } from "../../findings/scoreFindings.js";
+import { renderMarkdownReport } from "../../report/generateMarkdownReport.js";
+import type {
+  FinalFinding,
+  FindingCluster,
+  JudgeClassification,
+  JudgeResult,
+  SkepticResult,
+} from "../../findings/schema.js";
 
 /** Phase-3 workspace prep. Injected so tests avoid git/subprocess side effects. */
 export type PrepareWorkspaceFn = (input: PrepareWorkspaceInput) => Promise<WorkspaceResult>;
@@ -47,6 +58,8 @@ export interface ReviewOptions {
   runReviewers?: RunReviewers;
   /** Phase-8 skeptic / evidence validation. Defaults to the real one; inject a fake in tests. */
   skeptic?: RunSkeptic;
+  /** Phase-9 LLM-as-a-judge ranking. Defaults to the real one; inject a fake in tests. */
+  judge?: RunJudge;
 }
 
 /**
@@ -64,6 +77,7 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   const buildPacket = options.buildReviewPacket ?? buildReviewPacket;
   const review = options.runReviewers ?? runReviewers;
   const skeptic = options.skeptic ?? runSkeptic;
+  const judge = options.judge ?? runJudge;
 
   const pr = parsePrUrl(prUrl);
   const { config, source, path } = await loadConfig(cwd);
@@ -208,16 +222,19 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   // Phase 8 — skeptic / evidence validation. Each cluster is challenged with
   // deterministic file/line/diff checks and (unless disabled) an LLM skeptic that
   // tries to disprove it. Clusters the skeptic drops are excluded from the
-  // candidate list that will feed the judge; borderline ones are kept, annotated.
+  // candidate list that feeds the judge; borderline ones are kept, annotated.
+  let skepticResults: SkepticResult[] = [];
+  let candidates: FindingCluster[] = clusters;
   if (config.skeptic.enabled) {
     reporter.blank();
     const { results } = await skeptic({ clusters, packet, config, reporter });
     await writeJsonArtifact(paths.skeptic.results, results);
+    skepticResults = results;
+    candidates = selectSupportedClusters(clusters, results);
 
-    const supported = selectSupportedClusters(clusters, results);
-    const droppedCount = clusters.length - supported.length;
+    const droppedCount = clusters.length - candidates.length;
     reporter.success(
-      `${supported.length}/${clusters.length} cluster${clusters.length === 1 ? "" : "s"} supported by the skeptic` +
+      `${candidates.length}/${clusters.length} cluster${clusters.length === 1 ? "" : "s"} supported by the skeptic` +
         (droppedCount > 0 ? ` (${droppedCount} dropped as unsupported)` : "") +
         ` — see ${artifactLink(paths.skeptic.results)}`,
     );
@@ -229,5 +246,61 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
     reporter.note("Skeptic disabled (skeptic.enabled = false) — all clusters kept as candidates.");
   }
 
-  reporter.note("Judge and report generation arrive in later phases.");
+  // Phase 9 — LLM-as-a-judge ranking. Each supported cluster is classified
+  // (blocker / should_fix_before_review / nice_to_have / drop) and given a
+  // deterministic priority score. The full record (including drops, with reasons)
+  // is written to ranked_findings.json; the non-dropped, report-ready subset to
+  // final_findings.json. Dropping is recall-guarded: an over-eager drop on a
+  // well-supported high-severity finding is softened to nice_to_have.
+  // Hoisted (like skepticResults) so the Phase-10 report can read them after the
+  // gate; both stay null when the judge is disabled and the report degrades.
+  let ranked: JudgeResult[] | null = null;
+  let final: FinalFinding[] | null = null;
+  if (config.judge.enabled) {
+    reporter.blank();
+    ({ ranked } = await judge({ clusters: candidates, skepticResults, packet, config, reporter }));
+    await writeJsonArtifact(paths.judge.ranked, ranked);
+
+    final = selectFinalFindings(candidates, ranked, skepticResults);
+    await writeJsonArtifact(paths.finalFindings, final);
+
+    const counts: Record<JudgeClassification, number> = {
+      blocker: 0,
+      should_fix_before_review: 0,
+      nice_to_have: 0,
+      drop: 0,
+    };
+    for (const r of ranked) counts[r.decision.classification]++;
+    reporter.success(
+      `${final.length}/${ranked.length} ranked finding${ranked.length === 1 ? "" : "s"} in the report ` +
+        `(${counts.blocker} blocker, ${counts.should_fix_before_review} should-fix, ${counts.nice_to_have} optional; ` +
+        `${counts.drop} dropped) — see ${artifactLink(paths.finalFindings)}`,
+    );
+  } else {
+    reporter.note("Judge disabled (judge.enabled = false) — no ranking or final_findings.json produced.");
+  }
+
+  // Phase 10 — render the concise, human-facing report from the in-memory
+  // pipeline outputs (no disk round-trip). Degrades gracefully when the judge
+  // and/or skeptic are disabled (ranked/final null, skepticResults empty).
+  const reportMarkdown = renderMarkdownReport({
+    packet,
+    clusters,
+    candidates,
+    skepticResults,
+    ranked,
+    final,
+    rawFindingCount: reviewResult.findings.length,
+    meta: { toolVersion: options.version, generatedAt: metadata.timestamp },
+    options: {
+      maxFindings: config.review.maxFindings,
+      includeNiceToHave: config.review.includeNiceToHave,
+      judgeEnabled: config.judge.enabled,
+      skepticEnabled: config.skeptic.enabled,
+    },
+    paths,
+  });
+  await writeTextArtifact(paths.reportMd, reportMarkdown);
+  reporter.blank();
+  reporter.success(`report written — see ${artifactLink(paths.reportMd)}`);
 }

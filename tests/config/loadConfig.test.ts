@@ -37,7 +37,7 @@ describe("mergeConfig", () => {
     const merged = mergeConfig(defaultConfig, { review: { maxFindings: 5 } });
     expect(merged.review.maxFindings).toBe(5);
     expect(merged.review.includeNiceToHave).toBe(false);
-    expect(merged.models).toEqual(defaultConfig.models);
+    expect(merged.skeptic).toEqual(defaultConfig.skeptic);
   });
 
   it("replaces verification.commands entirely", () => {
@@ -61,10 +61,18 @@ describe("mergeConfig", () => {
     expect(merged.dedup.llm.backend).toBe("claude"); // sibling default preserved
   });
 
-  it("overrides the judge and leaves the reviewer roster intact", () => {
-    const merged = mergeConfig(defaultConfig, { models: { judge: "codex" } });
-    expect(merged.models.judge).toBe("codex");
+  it("overrides the judge backend and leaves the reviewer roster intact", () => {
+    const merged = mergeConfig(defaultConfig, { judge: { backend: "codex" } });
+    expect(merged.judge.backend).toBe("codex");
+    expect(merged.judge.enabled).toBe(true); // sibling default preserved
     expect(merged.agents.reviewers).toEqual(defaultConfig.agents.reviewers);
+  });
+
+  it("applies the judge defaults when no judge override is given", () => {
+    const merged = mergeConfig(defaultConfig, {});
+    expect(merged.judge).toEqual(defaultConfig.judge);
+    expect(merged.judge.enabled).toBe(true);
+    expect(merged.judge.backend).toBe("claude");
   });
 
   it("replaces agents.reviewers entirely, applying per-agent defaults, keeping siblings", () => {
@@ -112,6 +120,10 @@ describe("mergeConfig", () => {
     },
     { models: { primaryReviewer: "mock" } }, // stale pre-Phase-6 key
     { models: { secondaryReviewer: "codex" } }, // stale pre-Phase-6 key
+    { models: { judge: "codex" } }, // stale pre-Phase-9 key (moved to judge.backend)
+    { judge: { backend: "nope" } }, // unknown backend
+    { judge: { concurrency: 0 } }, // must be a positive int
+    { judge: { enabled: "yes" } }, // must be a boolean
   ])("throws ConfigError for an invalid override (%j)", (override) => {
     expect(() => mergeConfig(defaultConfig, override)).toThrow(ConfigError);
   });
@@ -143,6 +155,18 @@ describe("mergeConfig", () => {
     expect(() =>
       mergeConfig(defaultConfig, { models: { primaryReviewer: "mock" } }),
     ).toThrow(ConfigError);
+  });
+
+  it("rejects the stale models.judge key, pointing to judge.backend (Phase 9 migration)", () => {
+    // models.judge moved to judge.backend; an upgraded config must fail loudly
+    // rather than silently ignore it and keep the default judge backend.
+    let message = "";
+    try {
+      mergeConfig(defaultConfig, { models: { judge: "codex" } });
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/judge\.backend/);
   });
 });
 
