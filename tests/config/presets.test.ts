@@ -27,17 +27,18 @@ const STANDARD_NAMES = [
 
 // The demo preset is a frozen snapshot of the roster `standard` shipped with
 // before the codex correctness/security promotion. Deliberately hard-coded
-// here (NOT derived from STANDARD_NAMES) so the pin is enforced: if demo ever
-// "syncs" with an evolved standard, this test fails.
-const DEMO_NAMES = [
-  "claude_general_reviewer",
-  "codex_general_reviewer",
-  "claude_test_gap_reviewer",
-  "claude_correctness_reviewer",
-  "claude_repo_pattern_reviewer",
-  "claude_security_reviewer",
-  "claude_performance_reviewer",
-  "claude_product_intent_reviewer",
+// here (NOT derived from STANDARD_NAMES), and pinned as full
+// name→backend→angle tuples: if demo ever "syncs" with an evolved standard,
+// or any entry's backend or angle drifts inside the literal, this test fails.
+const DEMO_ROSTER = [
+  ["claude_general_reviewer", "claude", "general"],
+  ["codex_general_reviewer", "codex", "general"],
+  ["claude_test_gap_reviewer", "claude", "test-gap"],
+  ["claude_correctness_reviewer", "claude", "correctness"],
+  ["claude_repo_pattern_reviewer", "claude", "repo-pattern"],
+  ["claude_security_reviewer", "claude", "security"],
+  ["claude_performance_reviewer", "claude", "performance"],
+  ["claude_product_intent_reviewer", "claude", "product-intent"],
 ];
 
 describe("preset resolution in mergeConfig", () => {
@@ -65,7 +66,19 @@ describe("preset resolution in mergeConfig", () => {
 
     // demo is pinned to the pre-promotion 8-agent snapshot.
     const demo = mergeConfig(defaultConfig, { agents: { preset: "demo" } });
-    expect(demo.agents.reviewers.map((r) => r.name)).toEqual(DEMO_NAMES);
+    expect(demo.agents.reviewers.map((r) => [r.name, r.backend, r.angle])).toEqual(DEMO_ROSTER);
+    expect(demo.agents.reviewers.every((r) => r.enabled)).toBe(true);
+  });
+
+  it("keeps `deep` a superset of `standard` (fork-surviving guard)", () => {
+    // Trivially true today (`deep` is a direct alias of STANDARD_ROSTER); the
+    // point is to survive the promised future fork: if deep is rewritten as
+    // its own literal and later lags a standard addition, this fails even
+    // after deep's own equality assertion above is updated for the fork.
+    const deepNames = PRESET_ROSTERS.deep.map((r) => r.name);
+    for (const member of STANDARD_ROSTER) {
+      expect(deepNames).toContain(member.name);
+    }
   });
 
   it("keeps legacy semantics: `reviewers` alone replaces the roster exactly, no preset", () => {

@@ -68,7 +68,18 @@ I/O-bound, so the raise is low-risk.
   `collectDropped`). Low impact at current sizes, but a single shared index
   passed down would remove the repeated construction.
 
-## 7. Consider `.strict()` for the remaining config sub-schemas (consistency)
+## 7. Return a fresh config from `loadConfig`'s no-config-file path (hardening)
+
+When no `.pr-war-room.json` exists, `loadConfig` returns the module-level
+`defaultConfig` singleton by reference (`src/config/loadConfig.ts`), while the
+file-present path re-parses through `ConfigSchema` and returns fresh objects.
+No in-repo caller mutates the config and the CLI is one-shot, but both
+`loadConfig` and `defaultConfig` are exported from `src/index.ts`, so a
+long-lived programmatic consumer that mutates the returned config would
+silently poison every later default load in the same process. Clone (or
+schema-re-parse) on that path, or `Object.freeze` the exported default.
+
+## 8. Consider `.strict()` for the remaining config sub-schemas (consistency)
 
 `AgentSpecSchema` and `AgentsConfigSchema` are now `.strict()`, so a typo'd
 `preset` key or per-agent field key fails loudly. The other sub-schemas

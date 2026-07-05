@@ -397,7 +397,7 @@ describe("runReviewers", () => {
     expect(names).toContain("claude_correctness_reviewer");
   });
 
-  it("default roster covers all eight PRD §10.4 angles with cross-vendor duplicates (standard preset)", () => {
+  it("default roster covers all seven review angles with cross-vendor duplicates (standard preset)", () => {
     const roster = defaultConfig.agents.reviewers;
     // Every name→backend→angle pairing is pinned (not just the preset-added
     // agents): a swap between any two members must fail this test.
@@ -415,7 +415,7 @@ describe("runReviewers", () => {
     ];
     expect(roster.map((r) => [r.name, r.backend, r.angle])).toEqual(expected);
     expect(roster.every((r) => r.enabled)).toBe(true);
-    // Two waves by default: concurrency stays below the roster size to bound
+    // Three waves by default: concurrency stays below the roster size to bound
     // simultaneous `claude` subprocesses (memory + one account's rate limits).
     expect(defaultConfig.agents.concurrency).toBe(4);
   });

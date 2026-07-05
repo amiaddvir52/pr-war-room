@@ -33,9 +33,10 @@ import { formatZodError } from "../util/formatZodError.js";
  */
 
 /**
- * The default roster: every PRD §10.4 review angle, plus cross-backend
- * duplication of the three angles where independent agreement is the
- * strongest ranking signal (general, correctness, security — PRD §15.2). The
+ * The default roster: every review angle (PRD §10.4), plus cross-vendor
+ * duplication of the three highest-stakes angles (general, correctness,
+ * security), so agreement between independent vendors can feed the judge's
+ * source-agreement signal on the findings that matter most. The
  * Claude agents work with just `claude login`; the Codex agents only run when
  * a usable `codex` CLI is detected (otherwise each is reported as skipped,
  * never a silent omission — see backendAvailability.ts).
