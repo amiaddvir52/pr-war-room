@@ -7,10 +7,10 @@ import { FINDING_CATEGORIES, FINDING_SEVERITIES } from "../../findings/schema.js
  * exhaustive, and "would a senior teammate raise this in review?".
  *
  * Phase 6 parameterizes the prompt by `angle`: `general` is the broad reviewer;
- * the focused angles (test-gap, correctness, security, performance) narrow the
- * persona and add a focus/ignore block so each agent looks at the change through
- * a different lens (PRD §10.4). The shared principles and JSON contract are
- * identical across angles.
+ * the focused angles (test-gap, correctness, security, performance,
+ * repo-pattern, product-intent) narrow the persona and add a focus/ignore block
+ * so each agent looks at the change through a different lens (PRD §10.4). The
+ * shared principles and JSON contract are identical across angles.
  *
  * There is no downstream skeptic/judge yet, so each reviewer self-filters
  * against a concrete bar. When Phases 8–9 land, switch this to coverage-first
@@ -66,9 +66,12 @@ const ANGLE_PROMPTS: Record<ReviewerAngle, AnglePrompt> = {
       "Focus on security weaknesses introduced or exposed by the changed code.",
     ],
     focus: [
-      "Look for: injection (SQL/command/template), missing authentication or authorization",
-      "checks, unsafe secret/credential handling, unsafe deserialization, SSRF, and path",
-      'traversal. Prefer the "security" category. Ignore pure style and non-security nits.',
+      "Look for: injection (SQL/command/template), missing authentication, authorization, or",
+      "permission checks, unsafe secret/credential handling, unsafe deserialization, SSRF, path",
+      "traversal, insecure defaults, sensitive-data exposure or logging, and dangerous dependency",
+      'or configuration changes. Prefer the "security" category. Do not report a vulnerability',
+      "without a concrete path from the changed code — no speculative or checklist findings.",
+      "Ignore pure style and non-security nits.",
     ],
   },
   performance: {
@@ -77,9 +80,43 @@ const ANGLE_PROMPTS: Record<ReviewerAngle, AnglePrompt> = {
       "Focus on performance regressions introduced by the changed code.",
     ],
     focus: [
-      "Look for: accidental quadratic work, N+1 queries, unnecessary allocations or copies,",
-      "blocking I/O on hot paths, and unbounded growth. Prefer the \"performance\" category.",
-      "Ignore micro-optimizations a reviewer wouldn't raise, and ignore pure style.",
+      "Look for: accidental quadratic work, N+1 queries, repeated DB/network calls that could be",
+      "batched or cached, caching mistakes (wrong key, never invalidated), unnecessary",
+      "allocations or copies, blocking I/O on hot paths, unbounded memory growth, and wasteful",
+      'test/build behavior. Prefer the "performance" category. Ignore micro-optimizations a',
+      "reviewer wouldn't raise, and ignore pure style.",
+    ],
+  },
+  "repo-pattern": {
+    intro: [
+      "You are the Repo Pattern Reviewer performing a pre-review of a GitHub pull request.",
+      "Focus ONLY on where the changed code diverges from this repository's own established",
+      "conventions and patterns.",
+    ],
+    focus: [
+      "Use the packet's repo conventions section and the nearby/sibling code as the baseline.",
+      "Look for: error handling, naming, or structure that contradicts adjacent code,",
+      "re-implementation of a helper the repo already has, inconsistent use of the repo's own",
+      'APIs, and violations of visible architectural boundaries. Prefer the "maintainability"',
+      'category ("style" only when citing an explicit convention). Every finding must cite the',
+      "convention or a specific similar file as evidence — never report a personal style",
+      "preference with no repo precedent. Ignore correctness, test coverage, and performance.",
+    ],
+  },
+  "product-intent": {
+    intro: [
+      "You are the Product Intent Reviewer performing a pre-review of a GitHub pull request.",
+      "Focus ONLY on whether the change accomplishes what the PR says it does.",
+    ],
+    focus: [
+      "Compare the PR title and description against the implementation. Look for: described",
+      "behavior that is missing or only partially implemented, edge cases of the stated intent",
+      "left unhandled, changes that contradict the description, user-facing or API behavior",
+      "changed but not declared, backwards-compatibility breaks, and dead wiring (a feature",
+      "added but never called, exported, or registered). If the description is empty, infer",
+      "intent from the title only and lower your confidence. Do not assume product requirements",
+      'that are not grounded in the PR text or the changed code. Prefer the "product" category.',
+      "Ignore style, test coverage, and performance.",
     ],
   },
 };

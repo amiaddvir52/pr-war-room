@@ -1,9 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { ZodError } from "zod";
 import { defaultConfig } from "./defaultConfig.js";
+import { replacesRosterWithoutPreset, resolvePresetRoster } from "./presets.js";
 import { ConfigSchema, type Config } from "./schema.js";
 import { ConfigError } from "../errors.js";
+import { isPlainObject } from "../util/isPlainObject.js";
+import { formatZodError } from "../util/formatZodError.js";
 
 export const CONFIG_FILENAME = ".pr-war-room.json";
 
@@ -11,10 +13,6 @@ export interface LoadedConfig {
   config: Config;
   source: "default" | "file";
   path: string | null;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -43,21 +41,25 @@ export function deepMerge(
   return result;
 }
 
-function formatZodError(error: ZodError): string {
-  return error.issues
-    .map((issue) => {
-      const path = issue.path.join(".");
-      return path ? `${path}: ${issue.message}` : issue.message;
-    })
-    .join("; ");
-}
-
 /**
- * Pure merge + validation. `override` is deep-merged onto `base` and the result
- * is validated against the config schema. Throws `ConfigError` on any violation.
+ * Pure merge + validation. `agents.preset` (if any) is first expanded into a
+ * concrete `agents.reviewers` roster on the raw override (see presets.ts),
+ * then `override` is deep-merged onto `base` and the result is validated
+ * against the config schema. Throws `ConfigError` on any violation.
  */
 export function mergeConfig(base: Config, override: unknown): Config {
-  const merged = deepMerge(base as unknown as Record<string, unknown>, override);
+  const merged = deepMerge(
+    base as unknown as Record<string, unknown>,
+    resolvePresetRoster(override),
+  );
+  // Layering: an override that replaces the roster without naming a preset
+  // makes a `preset` label inherited from `base` stale — drop it so the
+  // parsed config only records a preset its roster actually came from. (The
+  // CLI merges once over the presetless defaults; this protects layered use
+  // of the exported API.)
+  if (replacesRosterWithoutPreset(override) && isPlainObject(merged["agents"])) {
+    delete merged["agents"]["preset"];
+  }
   const parsed = ConfigSchema.safeParse(merged);
   if (!parsed.success) {
     throw new ConfigError(`Invalid configuration: ${formatZodError(parsed.error)}`);

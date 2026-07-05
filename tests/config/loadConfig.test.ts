@@ -97,6 +97,12 @@ describe("mergeConfig", () => {
     { dedup: { llm: { enabled: "yes" } } }, // must be a boolean
     { reviews: {} }, // unknown top-level key (strict)
     { agents: { concurrency: 0 } }, // must be a positive int
+    { agents: { preset: "nope" } }, // unknown preset name (resolver no-ops, enum rejects)
+    { agents: { presets: "fast" } }, // typo'd `preset` key (agents schema is strict)
+    // typo'd field key on a preset override entry (AgentSpecSchema is strict)
+    { agents: { preset: "standard", reviewers: [{ name: "claude_security_reviewer", enable: false }] } },
+    // non-array `reviewers` must fail even when a preset is set
+    { agents: { preset: "standard", reviewers: { some_reviewer: { enabled: false } } } },
     { agents: { minUsableReviewers: 0 } }, // must be a positive int
     { agents: { reviewers: [{ name: "bad name!", backend: "mock" }] } }, // name not fs-safe
     { agents: { reviewers: [{ name: "x", backend: "nope" }] } }, // unknown backend

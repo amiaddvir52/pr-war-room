@@ -11,7 +11,7 @@ import type { JudgeResult, SkepticResult } from "../../src/findings/schema.js";
 import type { Finding } from "../../src/findings/schema.js";
 import { PrUrlError, GitHubError, ReviewerError } from "../../src/errors.js";
 import { CONFIG_FILENAME } from "../../src/config/loadConfig.js";
-import { silentReporter } from "../../src/ui/reporter.js";
+import { Reporter, silentReporter } from "../../src/ui/reporter.js";
 import type { IngestPullRequest, IngestResult } from "../../src/github/types.js";
 import type { PrepareWorkspaceInput, WorkspaceResult } from "../../src/workspace/types.js";
 import type { BuildReviewPacketInput, ReviewPacket } from "../../src/context/types.js";
@@ -265,12 +265,27 @@ describe("runReview (integration)", () => {
     expect(rv.calls).toHaveLength(1);
     expect(rv.calls[0]?.packetMarkdown).toBe("# packet");
     expect(rv.calls[0]?.packet.schemaVersion).toBe(1);
-    expect(rv.calls[0]?.config.agents.reviewers).toHaveLength(4);
+    expect(rv.calls[0]?.config.agents.reviewers).toHaveLength(8);
     expect(rv.calls[0]?.config.agents.reviewers[0]?.backend).toBe("claude");
     // The default roster now includes an independent Codex general reviewer.
     expect(rv.calls[0]?.config.agents.reviewers.map((r) => r.name)).toContain(
       "codex_general_reviewer",
     );
+  });
+
+  it("prints a Preset summary row only when the config chose one", async () => {
+    const lines: string[] = [];
+    const capturing = new Reporter({ color: false, out: (line) => lines.push(line), err: () => {} });
+    await writeFile(join(dir, CONFIG_FILENAME), JSON.stringify({ agents: { preset: "fast" } }), "utf8");
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, reporter: capturing }));
+    expect(lines.some((line) => line.includes("Preset") && line.includes("fast"))).toBe(true);
+  });
+
+  it("prints no Preset summary row for a default-config run", async () => {
+    const lines: string[] = [];
+    const capturing = new Reporter({ color: false, out: (line) => lines.push(line), err: () => {} });
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, reporter: capturing }));
+    expect(lines.some((line) => line.includes("Preset"))).toBe(false);
   });
 
   it("deduplicates the fan-out findings into finding_clusters.json (Phase 7)", async () => {

@@ -106,6 +106,9 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   const summary: ReadonlyArray<readonly [string, string]> = [
     ["PR", `${pr.owner}/${pr.repo}#${pr.number}`],
     ["Config", source === "file" && path ? relative(cwd, path) : "defaults"],
+    ...(config.agents.preset !== undefined
+      ? [["Preset", config.agents.preset] as const]
+      : []),
     ["Artifacts", relative(cwd, paths.root)],
   ];
 

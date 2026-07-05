@@ -1,3 +1,4 @@
+import { cloneRoster, STANDARD_ROSTER } from "./presets.js";
 import type { Config } from "./types.js";
 
 /**
@@ -5,25 +6,22 @@ import type { Config } from "./types.js";
  * schema-complete at compile time.
  */
 export const defaultConfig: Config = {
-  // Phase 6 — the multi-agent reviewer roster (PRD §10.4 / Phase 6 initial
-  // agents). Three Claude-backed angles plus an independent cross-vendor Codex
-  // general reviewer run in parallel by default. The Claude agents work with just
-  // `claude login`; the Codex agent is enabled by default but only *runs* when a
-  // usable `codex` CLI is detected (otherwise it is reported as skipped, never a
-  // silent omission — see backendAvailability.ts). `security` and `performance`
-  // are supported angles you can enable here too.
+  // Phase 6 — the multi-agent reviewer roster (PRD §10.4). The default is the
+  // `standard` preset: all eight review angles, one backend per angle — seven
+  // Claude-backed lenses (general, test-gap, correctness, repo-pattern,
+  // security, performance, product-intent) plus an independent cross-vendor
+  // Codex general reviewer. The Claude agents work with just `claude login`;
+  // the Codex agent is enabled by default but only *runs* when a usable
+  // `codex` CLI is detected (otherwise it is reported as skipped, never a
+  // silent omission — see backendAvailability.ts). Set `agents.preset` to
+  // "fast" / "standard" / "deep" / "demo" to pick a different roster, or list
+  // `agents.reviewers` to replace or (with a preset) override it by name —
+  // see config/presets.ts. `preset` is deliberately unset here so a run's
+  // metadata only records a preset the user actually chose.
   agents: {
-    reviewers: [
-      { name: "claude_general_reviewer", backend: "claude", angle: "general", enabled: true },
-      { name: "codex_general_reviewer", backend: "codex", angle: "general", enabled: true },
-      { name: "claude_test_gap_reviewer", backend: "claude", angle: "test-gap", enabled: true },
-      {
-        name: "claude_correctness_reviewer",
-        backend: "claude",
-        angle: "correctness",
-        enabled: true,
-      },
-    ],
+    reviewers: cloneRoster(STANDARD_ROSTER),
+    // Two waves for the 8-agent roster — see the schema comment for why this
+    // stays below the roster size (subprocess memory + shared rate limits).
     concurrency: 4,
     timeoutMs: 300_000,
     minUsableReviewers: 1,

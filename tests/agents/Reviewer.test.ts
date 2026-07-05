@@ -5,7 +5,7 @@ import { createClaudeCliModelClient } from "../../src/agents/claudeCli.js";
 import type { CliRunner } from "../../src/agents/cliRunner.js";
 import type { ModelClient, ModelRequest, ModelResult } from "../../src/agents/types.js";
 import type { FindingCore } from "../../src/findings/schema.js";
-import type { ReviewConfig } from "../../src/config/schema.js";
+import type { ReviewConfig, ReviewerAngle } from "../../src/config/schema.js";
 import { makeReviewPacket } from "../fixtures/reviewPacket.js";
 
 const REVIEW: ReviewConfig = { maxFindings: 20, includeNiceToHave: false };
@@ -42,7 +42,7 @@ function fakeClient(result: ModelResult): { client: ModelClient; requests: Model
 
 const input = { packet: makeReviewPacket(), packetMarkdown: "# HELLO PACKET" };
 
-function reviewer(client: ModelClient, angle: "general" | "test-gap" | "correctness" = "general") {
+function reviewer(client: ModelClient, angle: ReviewerAngle = "general") {
   return new Reviewer("claude_general_reviewer", client, angle, REVIEW);
 }
 
@@ -158,6 +158,30 @@ describe("buildSystemPrompt angles", () => {
     expect(buildSystemPrompt(REVIEW, "correctness")).toContain("Correctness Reviewer");
     expect(buildSystemPrompt(REVIEW, "security")).toContain("Security Reviewer");
     expect(buildSystemPrompt(REVIEW, "performance")).toContain("Performance Reviewer");
+    expect(buildSystemPrompt(REVIEW, "repo-pattern")).toContain("Repo Pattern Reviewer");
+    expect(buildSystemPrompt(REVIEW, "product-intent")).toContain("Product Intent Reviewer");
+  });
+
+  it("grounds the repo-pattern persona in repo precedent, not style preference", () => {
+    const prompt = buildSystemPrompt(REVIEW, "repo-pattern");
+    expect(prompt).toContain('"maintainability"');
+    expect(prompt).toMatch(/never report a personal style\s+preference/);
+    expect(prompt).toMatch(/cite the\s+convention or a specific similar file/);
+  });
+
+  it("grounds the product-intent persona in the PR description, with an empty-description rule", () => {
+    const prompt = buildSystemPrompt(REVIEW, "product-intent");
+    expect(prompt).toContain('"product"');
+    expect(prompt).toMatch(/If the description is empty/);
+    expect(prompt).toMatch(/Do not assume product requirements/);
+  });
+
+  it("forbids speculative security findings and micro-optimization noise", () => {
+    expect(buildSystemPrompt(REVIEW, "security")).toMatch(
+      /Do not report a vulnerability\s+without a concrete path from the changed code/,
+    );
+    expect(buildSystemPrompt(REVIEW, "performance")).toContain("caching mistakes");
+    expect(buildSystemPrompt(REVIEW, "performance")).toContain("micro-optimizations");
   });
 });
 
