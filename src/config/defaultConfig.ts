@@ -7,21 +7,22 @@ import type { Config } from "./types.js";
  */
 export const defaultConfig: Config = {
   // Phase 6 — the multi-agent reviewer roster (PRD §10.4). The default is the
-  // `standard` preset: all eight review angles, one backend per angle — seven
-  // Claude-backed lenses (general, test-gap, correctness, repo-pattern,
-  // security, performance, product-intent) plus an independent cross-vendor
-  // Codex general reviewer. The Claude agents work with just `claude login`;
-  // the Codex agent is enabled by default but only *runs* when a usable
-  // `codex` CLI is detected (otherwise it is reported as skipped, never a
-  // silent omission — see backendAvailability.ts). Set `agents.preset` to
-  // "fast" / "standard" / "deep" / "demo" to pick a different roster, or list
-  // `agents.reviewers` to replace or (with a preset) override it by name —
-  // see config/presets.ts. `preset` is deliberately unset here so a run's
-  // metadata only records a preset the user actually chose.
+  // `standard` preset: all eight review angles — seven Claude-backed lenses
+  // (general, test-gap, correctness, repo-pattern, security, performance,
+  // product-intent) — plus three independent cross-vendor Codex reviewers
+  // (general, correctness, security), ten agents total. The Claude agents
+  // work with just `claude login`; the Codex agents are enabled by default
+  // but only *run* when a usable `codex` CLI is detected (otherwise each is
+  // reported as skipped, never a silent omission — see
+  // backendAvailability.ts). Set `agents.preset` to "fast" / "standard" /
+  // "deep" / "demo" to pick a different roster, or list `agents.reviewers` to
+  // replace or (with a preset) override it by name — see config/presets.ts.
+  // `preset` is deliberately unset here so a run's metadata only records a
+  // preset the user actually chose.
   agents: {
     reviewers: cloneRoster(STANDARD_ROSTER),
-    // Two waves for the 8-agent roster — see the schema comment for why this
-    // stays below the roster size (subprocess memory + shared rate limits).
+    // Three waves for the 10-agent roster — see the schema comment for why
+    // this stays below the roster size (subprocess memory + shared rate limits).
     concurrency: 4,
     timeoutMs: 300_000,
     minUsableReviewers: 1,

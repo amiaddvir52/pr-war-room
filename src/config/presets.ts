@@ -33,12 +33,12 @@ import { formatZodError } from "../util/formatZodError.js";
  */
 
 /**
- * The default roster: every PRD §10.4 review angle, one backend per angle.
- * Eight independent perspectives beat duplicating fewer angles across
- * backends (PRD §15.2); cross-backend duplication lives in `deep`. The Claude
- * agents work with just `claude login`; the Codex agent only runs when a
- * usable `codex` CLI is detected (otherwise it is reported as skipped, never
- * a silent omission — see backendAvailability.ts).
+ * The default roster: every PRD §10.4 review angle, plus cross-backend
+ * duplication of the three angles where independent agreement is the
+ * strongest ranking signal (general, correctness, security — PRD §15.2). The
+ * Claude agents work with just `claude login`; the Codex agents only run when
+ * a usable `codex` CLI is detected (otherwise each is reported as skipped,
+ * never a silent omission — see backendAvailability.ts).
  */
 export const STANDARD_ROSTER: readonly AgentSpec[] = [
   { name: "claude_general_reviewer", backend: "claude", angle: "general", enabled: true },
@@ -54,6 +54,8 @@ export const STANDARD_ROSTER: readonly AgentSpec[] = [
     angle: "product-intent",
     enabled: true,
   },
+  { name: "codex_correctness_reviewer", backend: "codex", angle: "correctness", enabled: true },
+  { name: "codex_security_reviewer", backend: "codex", angle: "security", enabled: true },
 ];
 
 export const PRESET_ROSTERS: Record<PresetName, readonly AgentSpec[]> = {
@@ -65,19 +67,35 @@ export const PRESET_ROSTERS: Record<PresetName, readonly AgentSpec[]> = {
     { name: "claude_correctness_reviewer", backend: "claude", angle: "correctness", enabled: true },
   ],
   standard: STANDARD_ROSTER,
-  // Standard plus cross-backend duplication of the two angles where
-  // independent agreement is the strongest ranking signal. The codex entries
-  // are detection-gated like codex_general_reviewer.
-  deep: [
-    ...STANDARD_ROSTER,
-    { name: "codex_correctness_reviewer", backend: "codex", angle: "correctness", enabled: true },
-    { name: "codex_security_reviewer", backend: "codex", angle: "security", enabled: true },
+  // Currently identical to `standard`, which absorbed deep's cross-vendor
+  // correctness/security duplicates. Kept so existing `"preset": "deep"`
+  // configs stay valid; it will grow again when more angles merit
+  // cross-vendor duplication.
+  deep: STANDARD_ROSTER,
+  // Stage-run roster: a literal snapshot of the 8-agent roster `standard`
+  // shipped with before the codex correctness/security promotion, frozen so
+  // demos keep the roster they were rehearsed with. Deliberately NOT a
+  // reference to STANDARD_ROSTER — do not "sync" it when standard evolves.
+  demo: [
+    { name: "claude_general_reviewer", backend: "claude", angle: "general", enabled: true },
+    { name: "codex_general_reviewer", backend: "codex", angle: "general", enabled: true },
+    { name: "claude_test_gap_reviewer", backend: "claude", angle: "test-gap", enabled: true },
+    { name: "claude_correctness_reviewer", backend: "claude", angle: "correctness", enabled: true },
+    {
+      name: "claude_repo_pattern_reviewer",
+      backend: "claude",
+      angle: "repo-pattern",
+      enabled: true,
+    },
+    { name: "claude_security_reviewer", backend: "claude", angle: "security", enabled: true },
+    { name: "claude_performance_reviewer", backend: "claude", angle: "performance", enabled: true },
+    {
+      name: "claude_product_intent_reviewer",
+      backend: "claude",
+      angle: "product-intent",
+      enabled: true,
+    },
   ],
-  // Stage-run roster. Currently identical to `standard` (an alias, not a
-  // copy — a copy in the same file just drifts in lockstep); fork it into a
-  // pinned literal snapshot the first time `standard` evolves, so demos stay
-  // stable across versions.
-  demo: STANDARD_ROSTER,
 };
 
 function isPresetName(value: unknown): value is PresetName {

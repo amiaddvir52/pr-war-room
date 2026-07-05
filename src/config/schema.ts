@@ -81,9 +81,9 @@ export const AgentsConfigSchema = z
     // The reviewer roster. Runs in parallel; disabled entries are skipped.
     reviewers: z.array(AgentSpecSchema).default([]),
     // Max reviewers running at once (each may spawn a subprocess / model call).
-    // Deliberately below the 8-agent `standard` roster (two waves): each
+    // Deliberately below the 10-agent `standard` roster (three waves): each
     // `claude` reviewer is a full CLI subprocess holding the whole packet, and
-    // all of them share one account's rate limits — raise to 8 to run the
+    // all of them share one account's rate limits — raise to 10 to run the
     // standard roster in a single wave if your machine/limits absorb it.
     concurrency: z.number().int().positive().default(4),
     // Default per-agent timeout in ms (a hung reviewer is recorded, not fatal).

@@ -47,9 +47,10 @@ reclassification with a typed exhaustive assertion so a real `"drop"` reaching
 here would fail loudly instead of being masked; only the type-level `Exclude`
 narrow is actually needed.
 
-## 5. Revisit skeptic/judge concurrency for the 8-agent default roster (tuning)
+## 5. Revisit skeptic/judge concurrency for the 10-agent default roster (tuning)
 
-The default roster grew from 4 to 8 reviewers (`standard` preset), so dedupe
+The default roster grew from 4 to 10 reviewers (`standard` preset, now
+including cross-vendor codex correctness/security duplicates), so dedupe
 now feeds more clusters into the per-cluster skeptic and judge phases, which
 still run at `concurrency: 4` (deliberately unchanged — don't pre-optimize).
 If a real run measures slow in those phases, bump `skeptic.concurrency` /

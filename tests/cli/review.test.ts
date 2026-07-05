@@ -265,7 +265,7 @@ describe("runReview (integration)", () => {
     expect(rv.calls).toHaveLength(1);
     expect(rv.calls[0]?.packetMarkdown).toBe("# packet");
     expect(rv.calls[0]?.packet.schemaVersion).toBe(1);
-    expect(rv.calls[0]?.config.agents.reviewers).toHaveLength(8);
+    expect(rv.calls[0]?.config.agents.reviewers).toHaveLength(10);
     expect(rv.calls[0]?.config.agents.reviewers[0]?.backend).toBe("claude");
     // The default roster now includes an independent Codex general reviewer.
     expect(rv.calls[0]?.config.agents.reviewers.map((r) => r.name)).toContain(

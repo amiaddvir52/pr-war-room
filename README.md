@@ -79,16 +79,17 @@ Backends:
 Angles: `general` (broad review), `test-gap`, `correctness`, `security`,
 `performance`, `repo-pattern` (divergence from the repo's own conventions), and
 `product-intent` (does the change do what the PR says it does). The default
-roster is the **`standard` preset**: all eight PRD review angles, one backend
-per angle — seven Claude-backed reviewers (`general`, `test-gap`,
-`correctness`, `repo-pattern`, `security`, `performance`, `product-intent`)
-plus a **Codex `general` reviewer** (detection-gated, above). Set
+roster is the **`standard` preset**, ten agents: all eight PRD review angles
+via seven Claude-backed reviewers (`general`, `test-gap`, `correctness`,
+`repo-pattern`, `security`, `performance`, `product-intent`) plus **three
+Codex reviewers** (`general`, `correctness`, `security` — all detection-gated,
+above), so the highest-value angles get cross-vendor agreement by default. Set
 `agents.preset` to pick a different roster: `"fast"` (3 agents — the two
-cross-vendor generals + correctness), `"standard"` (the 8-agent default),
-`"deep"` (standard + Codex-backed `correctness` and `security` duplicates, so
-the highest-value angles get cross-vendor agreement), or `"demo"` (the
-stage-run roster — currently identical to `standard`, to be frozen to a
-snapshot when `standard` next evolves so demos stay stable).
+cross-vendor generals + correctness), `"standard"` (the 10-agent default),
+`"deep"` (currently identical to `standard`, which absorbed its cross-vendor
+duplicates; kept for compatibility and will grow again when more angles merit
+duplication), or `"demo"` (a pinned snapshot of the previous 8-agent roster,
+frozen so stage runs keep the roster they were rehearsed with).
 `judge.backend` selects the model the Phase-9 ranker runs on (see the `judge`
 config below).
 
@@ -196,7 +197,7 @@ the current directory, in which case it is deep-merged over the defaults
 The reviewer roster resolves from `agents.preset` and `agents.reviewers` in four
 deterministic cases:
 
-- **neither set** → the default `standard` roster (all eight angles).
+- **neither set** → the default `standard` roster (ten agents, all eight angles).
 - **`preset` only** → that preset's roster.
 - **`reviewers` only** → the array **replaces** the default roster exactly, as
   it always has — provide the full list you want (unchanged legacy behavior).
@@ -218,15 +219,15 @@ Each entry needs a filesystem-safe `name` (used for its `raw/<name>_*` artifacts
 and finding ids, so names must be unique — compared case-insensitively), a
 `backend`, and an `angle`; `enabled` and a per-agent `timeoutMs` override are
 optional. `agents.concurrency` caps how many run at once (default `4` — the
-8-agent standard roster runs in two waves; raise to `8` for a single wave if
-your machine and rate limits absorb up to 7 simultaneous `claude` CLI
+10-agent standard roster runs in three waves; raise to `10` for a single wave
+if your machine and rate limits absorb up to 7 simultaneous `claude` CLI
 processes) and `agents.timeoutMs` is the default per-agent timeout. To **force-enable / force-disable** a reviewer, set
-`"enabled": true`/`false` on its entry — the default Codex reviewer is enabled
-but only *runs* when the `codex` CLI is detected, so setting `"enabled": false`
-on it is how you turn Codex off explicitly; a disabled agent is reported as
-`skipped: disabled by config`, not hidden. The eight-agent default costs roughly
-twice the model calls of the old four-agent roster; `{"agents": {"preset":
-"fast"}}` is the one-line opt-down.
+`"enabled": true`/`false` on its entry — the default Codex reviewers are
+enabled but only *run* when the `codex` CLI is detected, so setting
+`"enabled": false` on each is how you turn Codex off explicitly; a disabled
+agent is reported as `skipped: disabled by config`, not hidden. The ten-agent
+default costs roughly 2.5× the model calls of the old four-agent roster;
+`{"agents": {"preset": "fast"}}` is the one-line opt-down.
 
 `agents.minUsableReviewers` (default `1`) is the success threshold: the review
 succeeds only if at least this many reviewers that **ran** return **usable**

@@ -21,10 +21,27 @@ const STANDARD_NAMES = [
   "claude_security_reviewer",
   "claude_performance_reviewer",
   "claude_product_intent_reviewer",
+  "codex_correctness_reviewer",
+  "codex_security_reviewer",
+];
+
+// The demo preset is a frozen snapshot of the roster `standard` shipped with
+// before the codex correctness/security promotion. Deliberately hard-coded
+// here (NOT derived from STANDARD_NAMES) so the pin is enforced: if demo ever
+// "syncs" with an evolved standard, this test fails.
+const DEMO_NAMES = [
+  "claude_general_reviewer",
+  "codex_general_reviewer",
+  "claude_test_gap_reviewer",
+  "claude_correctness_reviewer",
+  "claude_repo_pattern_reviewer",
+  "claude_security_reviewer",
+  "claude_performance_reviewer",
+  "claude_product_intent_reviewer",
 ];
 
 describe("preset resolution in mergeConfig", () => {
-  it("defaults to the standard 8-agent roster when neither preset nor reviewers is set", () => {
+  it("defaults to the standard 10-agent roster when neither preset nor reviewers is set", () => {
     const merged = mergeConfig(defaultConfig, {});
     expect(merged.agents.reviewers.map((r) => r.name)).toEqual(STANDARD_NAMES);
     expect(merged.agents.reviewers).toEqual(defaultConfig.agents.reviewers);
@@ -40,17 +57,15 @@ describe("preset resolution in mergeConfig", () => {
       "claude_correctness_reviewer",
     ]);
 
+    // deep is currently identical to standard (standard absorbed its
+    // cross-vendor correctness/security duplicates).
     const deep = mergeConfig(defaultConfig, { agents: { preset: "deep" } });
     expect(deep.agents.reviewers).toHaveLength(10);
-    expect(deep.agents.reviewers.map((r) => r.name)).toEqual([
-      ...STANDARD_NAMES,
-      "codex_correctness_reviewer",
-      "codex_security_reviewer",
-    ]);
+    expect(deep.agents.reviewers.map((r) => r.name)).toEqual(STANDARD_NAMES);
 
-    // demo is a pinned copy of the 8-angle roster.
+    // demo is pinned to the pre-promotion 8-agent snapshot.
     const demo = mergeConfig(defaultConfig, { agents: { preset: "demo" } });
-    expect(demo.agents.reviewers.map((r) => r.name)).toEqual(STANDARD_NAMES);
+    expect(demo.agents.reviewers.map((r) => r.name)).toEqual(DEMO_NAMES);
   });
 
   it("keeps legacy semantics: `reviewers` alone replaces the roster exactly, no preset", () => {
@@ -62,7 +77,7 @@ describe("preset resolution in mergeConfig", () => {
     expect(merged.agents.preset).toBeUndefined();
   });
 
-  it("merges a partial entry onto its preset member by name (disable one of eight)", () => {
+  it("merges a partial entry onto its preset member by name (disable one of ten)", () => {
     const merged = mergeConfig(defaultConfig, {
       agents: {
         preset: "standard",
@@ -82,7 +97,7 @@ describe("preset resolution in mergeConfig", () => {
         reviewers: [{ name: "CLAUDE_SECURITY_REVIEWER", enabled: false }],
       },
     });
-    expect(merged.agents.reviewers).toHaveLength(8);
+    expect(merged.agents.reviewers).toHaveLength(10);
     // The member keeps its canonical name casing — the name is its artifact
     // filename stem and finding-id prefix, so a case-variant override must not
     // silently rename it.
@@ -109,7 +124,7 @@ describe("preset resolution in mergeConfig", () => {
         reviewers: [{ name: "my_extra_reviewer", backend: "mock", angle: "security" }],
       },
     });
-    expect(merged.agents.reviewers).toHaveLength(9);
+    expect(merged.agents.reviewers).toHaveLength(11);
     expect(merged.agents.reviewers.at(-1)).toMatchObject({
       name: "my_extra_reviewer",
       backend: "mock",
@@ -136,7 +151,7 @@ describe("preset resolution in mergeConfig", () => {
 
   it("rejects appending a full-spec entry that is disabled (typo'd disable)", () => {
     // A full spec with a misspelled name would otherwise silently append a
-    // ninth agent while the real one stays enabled; `enabled: false` on a NEW
+    // new agent while the real one stays enabled; `enabled: false` on a NEW
     // agent is a no-op, so it is always a typo'd override — fail loudly.
     const attempt = () =>
       mergeConfig(defaultConfig, {
@@ -246,6 +261,6 @@ describe("preset resolution in mergeConfig", () => {
     });
     const pristine = PRESET_ROSTERS.standard.find((r) => r.name === "claude_security_reviewer");
     expect(pristine?.enabled).toBe(true);
-    expect(STANDARD_ROSTER).toHaveLength(8);
+    expect(STANDARD_ROSTER).toHaveLength(10);
   });
 });
