@@ -8,10 +8,12 @@ import type { ModelClient, ModelRequest, ModelResult } from "./types.js";
  * mode (`codex exec`), reusing the developer's existing `codex login`. This is
  * the second, cross-vendor reviewer backend (PRD §10.4 "Codex Reviewer").
  *
- * Codex is **opt-in**: it is not in the default roster. When a config enables a
- * `codex`-backed agent but the binary or auth is missing, the orchestrator
- * records that one agent as failed (with the diagnostic below) and continues —
- * it never fails the whole review.
+ * Codex is in the default roster but **detection-gated**: the orchestrator
+ * probes for the `codex` CLI first and records the agent as `skipped` (never run)
+ * when it isn't installed, so a missing Codex is a visible skip rather than a
+ * hard failure. If the CLI *is* present but auth/exec fails at run time, the
+ * diagnostics below classify it as failed and the run continues — a single
+ * `codex` agent never fails the whole review.
  *
  * Unlike `claude -p`, `codex exec` has no `--system-prompt` flag and no
  * structured-output envelope, so we (1) concatenate the system + user prompt and

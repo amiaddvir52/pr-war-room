@@ -11,6 +11,8 @@ import type { Reporter } from "../ui/reporter.js";
 import { MockReviewer } from "./MockReviewer.js";
 import { Reviewer } from "./Reviewer.js";
 import { createModelClient } from "./modelClient.js";
+import { defaultDetectBackend } from "./backendAvailability.js";
+import type { DetectBackend } from "./backendAvailability.js";
 import type { ModelClient, RawAgentResult, ReviewerAgent } from "./types.js";
 import { mapWithConcurrency } from "../util/mapWithConcurrency.js";
 import { TIMEOUT_GRACE_MS, withTimeout } from "../util/withTimeout.js";
@@ -26,6 +28,12 @@ export interface RunReviewersInput {
    * `ModelClient` to use (only called for non-`mock` backends).
    */
   makeClient?: (spec: AgentSpec) => ModelClient;
+  /**
+   * Injected in tests to simulate an available / unavailable backend without
+   * touching the real PATH or environment. Defaults to {@link defaultDetectBackend},
+   * which gates the optional `codex` backend on a `codex`-CLI PATH probe.
+   */
+  detectBackend?: DetectBackend;
 }
 
 /**
@@ -33,13 +41,27 @@ export interface RunReviewersInput {
  * returned valid structured output (`ok` with findings, `no_findings` with a
  * valid empty result). The rest produced nothing usable: `unusable_output` is a
  * refusal / truncation / unparseable or schema-invalid response, `failed` is a
- * hard error, `timeout` is exceeding the time budget.
+ * hard error, `timeout` is exceeding the time budget, and `skipped` means the
+ * agent never ran (disabled by config, or its backend was detected unavailable).
+ * `skipped` is deliberately distinct from `failed`: a skip is expected and benign
+ * (e.g. Codex isn't installed), a failure is a run that tried and errored.
  */
-export type AgentStatus = "ok" | "no_findings" | "unusable_output" | "failed" | "timeout";
+export type AgentStatus =
+  | "ok"
+  | "no_findings"
+  | "unusable_output"
+  | "failed"
+  | "timeout"
+  | "skipped";
 
 /** The usable outcomes: the reviewer returned valid structured output. */
 export function isUsable(status: AgentStatus): boolean {
   return status === "ok" || status === "no_findings";
+}
+
+/** True when the agent actually executed (i.e. was not skipped). */
+export function didRun(status: AgentStatus): boolean {
+  return status !== "skipped";
 }
 
 /** Per-agent execution record (written to `raw/agent_runs.json`). */
@@ -53,7 +75,11 @@ export interface AgentRun {
   droppedCount: number;
   /** Set for `unusable_output`: the refusal / truncation / parse-failure detail. */
   parseError: string | null;
-  /** Hard failure message (missing credentials, CLI not found, timeout, …). */
+  /**
+   * Hard failure message (missing credentials, CLI not found, timeout, …) for
+   * `failed`/`timeout`, or the human-readable reason for a `skipped` agent
+   * ("disabled by config", "codex CLI not found on PATH").
+   */
   error: string | null;
   /** Relative path to the raw output, when it was captured. */
   rawRef: string | null;
@@ -89,6 +115,27 @@ function buildReviewer(spec: AgentSpec, review: ReviewConfig, input: RunReviewer
     ? input.makeClient(spec)
     : createModelClient(spec.backend, { timeoutMs });
   return new Reviewer(spec.name, client, spec.angle, review);
+}
+
+/**
+ * A reviewer that never ran (disabled by config, or its backend was detected
+ * unavailable). Recorded so the roster stays fully transparent — every
+ * configured agent appears in `agent_runs.json` and the summary, none is silently
+ * omitted. The `reason` is stored in `error` and surfaced to the user.
+ */
+function skippedRun(spec: AgentSpec, reason: string): AgentRun {
+  return {
+    name: spec.name,
+    backend: spec.backend,
+    angle: spec.angle,
+    status: "skipped",
+    durationMs: 0,
+    findingCount: 0,
+    droppedCount: 0,
+    parseError: null,
+    error: reason,
+    rawRef: null,
+  };
 }
 
 /** Run one reviewer, capture its artifacts, and return its record + findings. */
@@ -197,21 +244,50 @@ function warnFailure(reporter: Reporter, run: AgentRun): void {
  */
 export const runReviewers: RunReviewers = async (input) => {
   const { config, paths, reporter } = input;
-  const specs = config.agents.reviewers.filter((r) => r.enabled);
-  if (specs.length === 0) {
+  // Every configured reviewer — including disabled ones — appears in the roster
+  // so the run stays transparent: disabled/unavailable agents are recorded as
+  // `skipped`, never silently omitted (PRD Phase 6).
+  const specs = config.agents.reviewers;
+  if (specs.every((s) => !s.enabled)) {
     throw new ReviewerError(
       "No reviewer agents are enabled. Add at least one entry to `agents.reviewers` " +
         "(with `enabled: true`) in .pr-war-room.json.",
     );
   }
 
-  // Live board: one row per reviewer, flipping queued → running → ✓/✗ in place,
-  // so the user sees every agent and which are still running. (Off a TTY it
-  // degrades to one line per agent as each resolves.)
+  // Detect each backend's availability at most once, even when several agents
+  // share a backend (e.g. three `claude` agents → one probe).
+  const detect = input.detectBackend ?? defaultDetectBackend;
+  const availabilityCache = new Map<AgentSpec["backend"], ReturnType<DetectBackend>>();
+  const availabilityOf = (backend: AgentSpec["backend"]): ReturnType<DetectBackend> => {
+    let cached = availabilityCache.get(backend);
+    if (cached === undefined) {
+      cached = detect(backend);
+      availabilityCache.set(backend, cached);
+    }
+    return cached;
+  };
+
+  // Live board: one row per configured reviewer, flipping queued → running →
+  // ✓/✗/⊘ in place, so the user sees every agent and which are still running.
+  // (Off a TTY it degrades to one line per agent as each resolves.)
   const board = reporter.board(specs.map((s) => ({ key: s.name, label: `${s.name} (${s.angle})` })));
   let outcomes: Array<{ run: AgentRun; findings: Finding[] }>;
   try {
     outcomes = await mapWithConcurrency(specs, config.agents.concurrency, async (spec) => {
+      // Disabled agents are skipped without running — visible, never omitted.
+      if (!spec.enabled) {
+        board.set(spec.name, "skipped", "disabled by config");
+        return { run: skippedRun(spec, "disabled by config"), findings: [] };
+      }
+      // A backend that can't be attempted (e.g. the `codex` CLI isn't installed)
+      // is skipped with its reason — distinct from a run that tried and failed.
+      const availability = await availabilityOf(spec.backend);
+      if (!availability.available) {
+        const reason = availability.reason ?? `${spec.backend} backend unavailable`;
+        board.set(spec.name, "skipped", reason);
+        return { run: skippedRun(spec, reason), findings: [] };
+      }
       board.set(spec.name, "running");
       const outcome = await runOne(spec, input);
       const { status, detail } = boardResult(outcome.run);
@@ -232,18 +308,31 @@ export const runReviewers: RunReviewers = async (input) => {
   for (const run of agents) warnFailure(reporter, run);
 
   const usable = agents.filter((a) => isUsable(a.status));
+  const ran = agents.filter((a) => didRun(a.status));
+  const skipped = agents.filter((a) => a.status === "skipped");
   const minUsable = config.agents.minUsableReviewers;
   if (usable.length < minUsable) {
-    // Prefer a hard error to explain the shortfall; otherwise surface the first
-    // unusable-output detail (all agents ran but none returned valid findings).
+    const runsRef = relative(paths.root, paths.raw.agentRuns);
+    // When every configured agent was skipped, the shortfall is an availability
+    // problem, not a review failure — say so plainly with the first skip reason.
+    if (ran.length === 0) {
+      throw new ReviewerError(
+        `All ${agents.length} configured reviewer agents were skipped (none ran). ` +
+          `See ${runsRef} for details. First skip reason: ` +
+          `${firstLine(skipped[0]?.error ?? "unknown")}`,
+      );
+    }
+    // Otherwise agents ran but too few were usable. Prefer a hard error, then an
+    // unusable-output detail, then (last) a skip reason, to explain the shortfall.
     const firstProblem =
-      agents.find((a) => a.error !== null)?.error ??
-      agents.find((a) => a.parseError !== null)?.parseError ??
+      ran.find((a) => a.error !== null)?.error ??
+      ran.find((a) => a.parseError !== null)?.parseError ??
+      skipped[0]?.error ??
       "unknown error";
     throw new ReviewerError(
-      `Only ${usable.length} of ${agents.length} reviewer agents produced usable output ` +
-        `(need at least ${minUsable}). See ${relative(paths.root, paths.raw.agentRuns)} for ` +
-        `details. First problem: ${firstLine(firstProblem)}`,
+      `Only ${usable.length} of ${ran.length} reviewer agents that ran produced usable output ` +
+        `(need at least ${minUsable}). See ${runsRef} for details. ` +
+        `First problem: ${firstLine(firstProblem)}`,
     );
   }
 

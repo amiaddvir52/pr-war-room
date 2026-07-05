@@ -14,7 +14,7 @@ import type {
   BuildReviewPacketInput,
   BuildReviewPacketResult,
 } from "../../context/buildReviewPacket.js";
-import { runReviewers, isUsable } from "../../agents/runReviewers.js";
+import { runReviewers, isUsable, didRun } from "../../agents/runReviewers.js";
 import type { RunReviewers } from "../../agents/runReviewers.js";
 import { deduplicateFindings } from "../../findings/deduplicateFindings.js";
 import { createDedupAdjudicator } from "../../agents/DedupAdjudicator.js";
@@ -182,18 +182,27 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   });
 
   // We only reach here when the run met `agents.minUsableReviewers` (otherwise
-  // runReviewers threw). `usable` reviewers returned valid output; the rest
-  // (unusable output / failed / timed out) are reported as a caveat, not success.
-  const total = reviewResult.agents.length;
-  const usable = reviewResult.agents.filter((a) => isUsable(a.status)).length;
-  const incomplete = reviewResult.agents.filter((a) => !isUsable(a.status));
+  // runReviewers threw). Break the roster into configured / ran / skipped so the
+  // summary makes it obvious what happened to each agent (PRD Phase 6): `usable`
+  // reviewers returned valid output; `incomplete` ran but produced nothing usable
+  // (unusable output / failed / timed out); `skipped` never ran (disabled or the
+  // backend — e.g. Codex — was unavailable) and is reported, never hidden.
+  const configured = reviewResult.agents.length;
+  const skipped = reviewResult.agents.filter((a) => a.status === "skipped");
+  const ran = reviewResult.agents.filter((a) => didRun(a.status));
+  const usable = ran.filter((a) => isUsable(a.status)).length;
+  const incomplete = ran.filter((a) => !isUsable(a.status));
 
   reporter.blank();
   const n = reviewResult.findings.length;
+  const ofConfigured = skipped.length > 0 ? ` of ${configured} configured` : "";
   reporter.success(
-    `${n} finding${n === 1 ? "" : "s"} from ${usable}/${total} reviewer${total === 1 ? "" : "s"} — ` +
+    `${n} finding${n === 1 ? "" : "s"} from ${usable}/${ran.length} reviewer${ran.length === 1 ? "" : "s"} that ran${ofConfigured} — ` +
       `see ${artifactLink(paths.normalized.allFindings)}`,
   );
+  for (const agent of skipped) {
+    reporter.note(`${agent.name} skipped: ${agent.error ?? "backend unavailable"}`);
+  }
   if (incomplete.length > 0) {
     reporter.warn(
       `${incomplete.length} reviewer${incomplete.length === 1 ? "" : "s"} did not complete ` +
