@@ -15,7 +15,7 @@ import { defaultDetectBackend } from "./backendAvailability.js";
 import type { DetectBackend } from "./backendAvailability.js";
 import type { ModelClient, RawAgentResult, ReviewerAgent } from "./types.js";
 import { mapWithConcurrency } from "../util/mapWithConcurrency.js";
-import { TIMEOUT_GRACE_MS, withTimeout } from "../util/withTimeout.js";
+import { retryOnTimeout } from "../util/retryOnTimeout.js";
 
 export interface RunReviewersInput {
   packet: ReviewPacket;
@@ -71,6 +71,13 @@ export interface AgentRun {
   angle: string;
   status: AgentStatus;
   durationMs: number;
+  /**
+   * How many times the reviewer was invoked (1 = no retry). > 1 means an earlier
+   * attempt timed out and was retried (`agents.retries`); the final `status`
+   * reflects the last attempt (`ok`/`no_findings` if a retry succeeded, `timeout`
+   * if they all timed out). `skipped` agents never ran, so this is 0.
+   */
+  attempts: number;
   findingCount: number;
   droppedCount: number;
   /** Set for `unusable_output`: the refusal / truncation / parse-failure detail. */
@@ -130,6 +137,7 @@ function skippedRun(spec: AgentSpec, reason: string): AgentRun {
     angle: spec.angle,
     status: "skipped",
     durationMs: 0,
+    attempts: 0,
     findingCount: 0,
     droppedCount: 0,
     parseError: null,
@@ -142,21 +150,31 @@ function skippedRun(spec: AgentSpec, reason: string): AgentRun {
 async function runOne(
   spec: AgentSpec,
   input: RunReviewersInput,
+  onTimeout?: (attempt: number) => void,
 ): Promise<{ run: AgentRun; findings: Finding[] }> {
   const { paths, config } = input;
   const base = { name: spec.name, backend: spec.backend, angle: spec.angle };
   const timeoutMs = spec.timeoutMs ?? config.agents.timeoutMs;
   const start = Date.now();
 
+  // Build the reviewer once; retryOnTimeout re-invokes `review()`, which spawns a
+  // fresh subprocess each call. A transient timeout is retried (agents.retries)
+  // so one slow Claude CLI call doesn't remove a whole reviewer angle; refusals /
+  // parse failures / hard errors are deterministic and NOT retried.
+  const reviewer = buildReviewer(spec, config.review, input);
+  let attempts = 0;
+
   let result: RawAgentResult;
   try {
-    const reviewer = buildReviewer(spec, config.review, input);
-    // The CLI backends self-kill their subprocess at `timeoutMs`; this backstop
-    // (a small grace later) covers the API backend and any hang. The grace lets
-    // the subprocess-killing timer fire first, avoiding orphaned processes.
-    result = await withTimeout(
-      reviewer.review({ packet: input.packet, packetMarkdown: input.packetMarkdown }),
-      timeoutMs + TIMEOUT_GRACE_MS,
+    // Each attempt gets its own `timeoutMs + grace` backstop inside retryOnTimeout;
+    // the CLI backends self-kill their subprocess at `timeoutMs`, and the grace
+    // lets that timer win the race so no subprocess is orphaned.
+    result = await retryOnTimeout(
+      () => {
+        attempts++;
+        return reviewer.review({ packet: input.packet, packetMarkdown: input.packetMarkdown });
+      },
+      { timeoutMs, retries: config.agents.retries, onTimeout: (n) => onTimeout?.(n) },
     );
   } catch (err) {
     const { status, message } = classifyError(err);
@@ -165,6 +183,7 @@ async function runOne(
         ...base,
         status,
         durationMs: Date.now() - start,
+        attempts,
         findingCount: 0,
         droppedCount: 0,
         parseError: null,
@@ -194,6 +213,7 @@ async function runOne(
       ...base,
       status,
       durationMs: Date.now() - start,
+      attempts,
       findingCount: findings.length,
       droppedCount: dropped.length,
       parseError: result.parseError,
@@ -272,6 +292,9 @@ export const runReviewers: RunReviewers = async (input) => {
   // ✓/✗/⊘ in place, so the user sees every agent and which are still running.
   // (Off a TTY it degrades to one line per agent as each resolves.)
   const board = reporter.board(specs.map((s) => ({ key: s.name, label: `${s.name} (${s.angle})` })));
+  // Retry notes are collected during the concurrent run and flushed AFTER the
+  // board freezes, so a "retrying" line never interleaves with the animation.
+  const retryNotes: string[] = [];
   let outcomes: Array<{ run: AgentRun; findings: Finding[] }>;
   try {
     outcomes = await mapWithConcurrency(specs, config.agents.concurrency, async (spec) => {
@@ -289,7 +312,11 @@ export const runReviewers: RunReviewers = async (input) => {
         return { run: skippedRun(spec, reason), findings: [] };
       }
       board.set(spec.name, "running");
-      const outcome = await runOne(spec, input);
+      const outcome = await runOne(spec, input, (attempt) =>
+        retryNotes.push(
+          `${spec.name} timed out (attempt ${attempt}/${config.agents.retries + 1}) — retrying`,
+        ),
+      );
       const { status, detail } = boardResult(outcome.run);
       board.set(spec.name, status, detail);
       return outcome;
@@ -297,12 +324,14 @@ export const runReviewers: RunReviewers = async (input) => {
   } finally {
     board.stop();
   }
+  for (const note of retryNotes) reporter.note(note);
 
   const agents = outcomes.map((o) => o.run);
   const findings = outcomes.flatMap((o) => o.findings);
 
   await writeJsonArtifact(paths.normalized.allFindings, findings);
-  await writeJsonArtifact(paths.raw.agentRuns, { schemaVersion: 1, agents });
+  // schemaVersion 2 adds `attempts` per agent (retry-on-timeout, Phase 6).
+  await writeJsonArtifact(paths.raw.agentRuns, { schemaVersion: 2, agents });
 
   // Surface any failure diagnostics once, below the finished board.
   for (const run of agents) warnFailure(reporter, run);

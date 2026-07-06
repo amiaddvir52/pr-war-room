@@ -190,6 +190,9 @@ describe("loadConfig", () => {
     const result = await loadConfig(dir);
     expect(result.source).toBe("default");
     expect(result.path).toBeNull();
+    // The path we looked for is always reported, so the CLI can say where it
+    // looked even when it falls back to defaults.
+    expect(result.searchedPath).toBe(join(dir, CONFIG_FILENAME));
     expect(result.config).toEqual(defaultConfig);
   });
 
@@ -202,6 +205,7 @@ describe("loadConfig", () => {
     const result = await loadConfig(dir);
     expect(result.source).toBe("file");
     expect(result.path).toBe(join(dir, CONFIG_FILENAME));
+    expect(result.searchedPath).toBe(join(dir, CONFIG_FILENAME));
     expect(result.config.review.maxFindings).toBe(3);
     expect(result.config.review.includeNiceToHave).toBe(false);
   });

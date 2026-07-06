@@ -19,6 +19,9 @@ export const defaultConfig: Config = {
     // this stays below the roster size (subprocess memory + shared rate limits).
     concurrency: 4,
     timeoutMs: 300_000,
+    // Retry a reviewer once on a transient timeout before recording it as timed
+    // out (see AgentsConfigSchema.retries).
+    retries: 1,
     minUsableReviewers: 1,
   },
   verification: {
@@ -63,6 +66,9 @@ export const defaultConfig: Config = {
     backend: "claude",
     concurrency: 4,
     timeoutMs: 120_000,
+    // Retry a cluster once on a transient skeptic timeout before falling back to
+    // the recall-first keep-unvalidated path (see SkepticConfigSchema.retries).
+    retries: 1,
   },
   // Phase 9 — LLM-as-a-judge ranking. ON by default (produces the report input),
   // on `claude` unless the backend is `mock` (which ranks deterministically).
@@ -72,6 +78,9 @@ export const defaultConfig: Config = {
     backend: "claude",
     concurrency: 4,
     timeoutMs: 90_000,
+    // Retry a cluster once on a transient judge timeout before ranking it by the
+    // deterministic fallback (see JudgeConfigSchema.retries).
+    retries: 1,
   },
   // Phase 11 — fix mode. One model call per selected finding; the cap takes
   // the highest-priority findings first. No `enabled` key — running `fix` is

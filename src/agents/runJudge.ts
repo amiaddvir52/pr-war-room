@@ -15,7 +15,7 @@ import type {
 } from "../findings/schema.js";
 import type { Reporter } from "../ui/reporter.js";
 import { mapWithConcurrency } from "../util/mapWithConcurrency.js";
-import { TIMEOUT_GRACE_MS, withTimeout } from "../util/withTimeout.js";
+import { retryOnTimeout } from "../util/retryOnTimeout.js";
 import { adaptiveClusterTimeoutMs } from "./clusterTimeout.js";
 import { createJudge, type Judge } from "./JudgeAgent.js";
 
@@ -85,6 +85,7 @@ export function reconcileJudge(
   skeptic: SkepticResult | null,
   modelVerdict: JudgeVerdict | null,
   failure: JudgeFailure | null,
+  attempts = 1,
 ): JudgeResult {
   const score = computePriorityScore(cluster, skeptic);
 
@@ -92,6 +93,7 @@ export function reconcileJudge(
   //    deterministic rules (which never drop) and keep, annotated.
   if (failure !== null) {
     const classification = deterministicClassification(cluster, skeptic);
+    const retried = attempts > 1 ? ` after ${attempts} attempts` : "";
     return {
       cluster_id: cluster.cluster_id,
       source: "fallback",
@@ -100,10 +102,11 @@ export function reconcileJudge(
         classification,
         score,
         include_in_main_report: classification !== "drop",
-        reason: `Judge could not complete (${failure.kind}: ${failure.message}); classified deterministically and kept for human review.`,
+        reason: `Judge could not complete (${failure.kind}: ${failure.message})${retried}; classified deterministically and kept for human review.`,
         softened_from_model_classification: null,
       },
       failure,
+      attempts,
     };
   }
 
@@ -122,6 +125,7 @@ export function reconcileJudge(
         softened_from_model_classification: null,
       },
       failure: null,
+      attempts,
     };
   }
 
@@ -143,6 +147,7 @@ export function reconcileJudge(
       softened_from_model_classification: softened ? "drop" : null,
     },
     failure: null,
+    attempts,
   };
 }
 
@@ -182,6 +187,9 @@ export const runJudge: RunJudge = async (input) => {
   const spinner = reporter.spinner(
     `ranking ${clusters.length} finding${clusters.length === 1 ? "" : "s"} with the judge`,
   );
+  // Retry notes collected during the concurrent run, flushed after the spinner
+  // stops so a "retrying" line never interleaves with the animation.
+  const retryNotes: string[] = [];
   let ranked: JudgeResult[];
   try {
     ranked = await mapWithConcurrency(clusters, config.judge.concurrency, async (cluster) => {
@@ -192,25 +200,39 @@ export const runJudge: RunJudge = async (input) => {
       // Adaptive budget: a big merged cluster carries a proportionally bigger
       // prompt, so it gets a bigger slice than a singleton (clusterTimeout.ts).
       const timeoutMs = adaptiveClusterTimeoutMs(config.judge.timeoutMs, cluster);
+      // Build the judge once; retryOnTimeout re-invokes the same closure (fresh
+      // subprocess per call), so retries don't re-probe the backend.
+      const judge = makeJudge(config, timeoutMs);
+      let attempts = 0;
       try {
-        const judge = makeJudge(config, timeoutMs);
-        const verdict = await withTimeout(
-          judge(cluster, skeptic, packet),
-          timeoutMs + TIMEOUT_GRACE_MS,
+        const verdict = await retryOnTimeout(
+          () => {
+            attempts++;
+            return judge(cluster, skeptic, packet);
+          },
+          {
+            timeoutMs,
+            retries: config.judge.retries,
+            onTimeout: (attempt) =>
+              retryNotes.push(
+                `judge timed out on "${cluster.merged_title}" (attempt ${attempt}/${config.judge.retries + 1}) — retrying`,
+              ),
+          },
         );
-        return reconcileJudge(cluster, skeptic, verdict, null);
+        return reconcileJudge(cluster, skeptic, verdict, null, attempts);
       } catch (err) {
         // Any error (timeout / refusal / parse failure / unexpected) → keep, annotate.
         const failure = classifyFailure(err);
         if (failure.kind === "unexpected") {
           reporter.warn(`Unexpected judge error on "${cluster.merged_title}": ${failure.message}`);
         }
-        return reconcileJudge(cluster, skeptic, null, failure);
+        return reconcileJudge(cluster, skeptic, null, failure, attempts);
       }
     });
   } finally {
     spinner.stop();
   }
+  for (const note of retryNotes) reporter.note(note);
 
   // Surface every keep-on-failure fallback loudly (mirrors runSkeptic): a
   // finding ranked by fallback was never actually judged, and the user should
@@ -218,8 +240,9 @@ export const runJudge: RunJudge = async (input) => {
   const titleById = new Map(clusters.map((c) => [c.cluster_id, c.merged_title]));
   for (const r of ranked) {
     if (r.failure !== null) {
+      const retried = r.attempts > 1 ? ` after ${r.attempts} attempts` : "";
       reporter.warn(
-        `judge ${r.failure.kind === "timeout" ? "timed out" : `failed (${r.failure.kind})`} on ` +
+        `judge ${r.failure.kind === "timeout" ? "timed out" : `failed (${r.failure.kind})`}${retried} on ` +
           `"${titleById.get(r.cluster_id) ?? r.cluster_id}" — classified deterministically (recall-first fallback)`,
       );
     }

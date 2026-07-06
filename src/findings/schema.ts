@@ -317,6 +317,12 @@ export const SkepticResultSchema = z.object({
   decision: SkepticDecisionSchema,
   // Non-null only when the skeptic could not complete for this cluster.
   failure: SkepticFailureSchema.nullable(),
+  // How many times the skeptic call was attempted for this cluster (1 = no
+  // retry). > 1 means an earlier attempt timed out and was retried
+  // (skeptic.retries); the audit trail shows retries whether the retry then
+  // succeeded (source "llm") or the finding was ultimately kept by the timeout
+  // fallback (source "fallback"). Defaulted so pre-retry artifacts still parse.
+  attempts: z.number().int().positive().default(1),
 });
 
 export type SkepticResult = z.infer<typeof SkepticResultSchema>;
@@ -437,6 +443,10 @@ export const JudgeResultSchema = z.object({
   decision: JudgeDecisionSchema,
   // Non-null only when the judge could not complete for this cluster.
   failure: JudgeFailureSchema.nullable(),
+  // Attempts made for this cluster (1 = no retry); > 1 means an earlier attempt
+  // timed out and was retried (judge.retries). Mirrors SkepticResult.attempts;
+  // defaulted so pre-retry artifacts still parse.
+  attempts: z.number().int().positive().default(1),
 });
 export type JudgeResult = z.infer<typeof JudgeResultSchema>;
 

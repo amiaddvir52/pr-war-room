@@ -116,6 +116,7 @@ describe("judgeFromClient", () => {
         },
         decision: { action: "keep", reason: "…", softened_from_model_action: null },
         failure: null,
+        attempts: 1,
       },
       packet,
     );

@@ -61,6 +61,7 @@ function skepticWith(
     },
     decision: { action, reason: "…", softened_from_model_action: null },
     failure: null,
+    attempts: 1,
   };
 }
 
@@ -78,6 +79,7 @@ function skepticDeterministic(action: "keep" | "downgrade"): SkepticResult {
     model_verdict: null,
     decision: { action, reason: "…", softened_from_model_action: null },
     failure: null,
+    attempts: 1,
   };
 }
 
@@ -198,6 +200,7 @@ describe("selectFinalFindings", () => {
       softened_from_model_classification: null,
     },
     failure: null,
+    attempts: 1,
   });
 
   it("excludes dropped clusters and orders by classification then score", () => {

@@ -11,7 +11,7 @@ import type {
 } from "../findings/schema.js";
 import type { Reporter } from "../ui/reporter.js";
 import { mapWithConcurrency } from "../util/mapWithConcurrency.js";
-import { TIMEOUT_GRACE_MS, withTimeout } from "../util/withTimeout.js";
+import { retryOnTimeout } from "../util/retryOnTimeout.js";
 import { adaptiveClusterTimeoutMs } from "./clusterTimeout.js";
 import { createSkeptic, type Skeptic } from "./SkepticAgent.js";
 
@@ -77,6 +77,7 @@ export function reconcileResult(
   checks: EvidenceChecks,
   modelVerdict: SkepticVerdict | null,
   failure: SkepticFailure | null,
+  attempts = 1,
 ): SkepticResult {
   // 1. Objective hard failure drops regardless of the model — but only this.
   if (hasHardFailure(checks)) {
@@ -88,11 +89,13 @@ export function reconcileResult(
       model_verdict: modelVerdict,
       decision: { action: "drop", reason: `Deterministic hard failure — ${reason}`, softened_from_model_action: null },
       failure,
+      attempts,
     };
   }
 
   // 2. Keep-on-failure: the skeptic could not produce a verdict. Keep, annotate.
   if (failure !== null) {
+    const retried = attempts > 1 ? ` after ${attempts} attempts` : "";
     return {
       cluster_id: clusterId,
       source: "fallback",
@@ -100,10 +103,11 @@ export function reconcileResult(
       model_verdict: modelVerdict,
       decision: {
         action: "keep",
-        reason: `Skeptic could not complete (${failure.kind}: ${failure.message}); kept pending human review.`,
+        reason: `Skeptic could not complete (${failure.kind}: ${failure.message})${retried}; kept pending human review.`,
         softened_from_model_action: null,
       },
       failure,
+      attempts,
     };
   }
 
@@ -123,6 +127,7 @@ export function reconcileResult(
         softened_from_model_action: null,
       },
       failure: null,
+      attempts,
     };
   }
 
@@ -143,6 +148,7 @@ export function reconcileResult(
       softened_from_model_action: softened ? "drop" : null,
     },
     failure: null,
+    attempts,
   };
 }
 
@@ -196,6 +202,9 @@ export const runSkeptic: RunSkeptic = async (input) => {
   const spinner = reporter.spinner(
     `validating ${clusters.length} cluster${clusters.length === 1 ? "" : "s"} with the skeptic`,
   );
+  // Retry notes are collected during the concurrent run and flushed AFTER the
+  // spinner stops, so a "retrying" line never interleaves with the animation.
+  const retryNotes: string[] = [];
   let results: SkepticResult[];
   try {
     results = await mapWithConcurrency(clusters, config.skeptic.concurrency, async (cluster) => {
@@ -206,25 +215,39 @@ export const runSkeptic: RunSkeptic = async (input) => {
       // Adaptive budget: a big merged cluster carries a proportionally bigger
       // prompt, so it gets a bigger slice than a singleton (clusterTimeout.ts).
       const timeoutMs = adaptiveClusterTimeoutMs(config.skeptic.timeoutMs, cluster);
+      // Build the skeptic once; retryOnTimeout re-invokes the SAME closure, which
+      // spawns a fresh subprocess each call — so retries don't re-probe the backend.
+      const skeptic = makeSkeptic(config, timeoutMs);
+      let attempts = 0;
       try {
-        const skeptic = makeSkeptic(config, timeoutMs);
-        const verdict = await withTimeout(
-          skeptic(cluster, packet, checks),
-          timeoutMs + TIMEOUT_GRACE_MS,
+        const verdict = await retryOnTimeout(
+          () => {
+            attempts++;
+            return skeptic(cluster, packet, checks);
+          },
+          {
+            timeoutMs,
+            retries: config.skeptic.retries,
+            onTimeout: (attempt) =>
+              retryNotes.push(
+                `skeptic timed out on "${cluster.merged_title}" (attempt ${attempt}/${config.skeptic.retries + 1}) — retrying`,
+              ),
+          },
         );
-        return reconcileResult(cluster.cluster_id, checks, verdict, null);
+        return reconcileResult(cluster.cluster_id, checks, verdict, null, attempts);
       } catch (err) {
         // Any error (timeout / refusal / parse failure / unexpected) → keep, annotate.
         const failure = classifyFailure(err);
         if (failure.kind === "unexpected") {
           reporter.warn(`Unexpected skeptic error on "${cluster.merged_title}": ${failure.message}`);
         }
-        return reconcileResult(cluster.cluster_id, checks, null, failure);
+        return reconcileResult(cluster.cluster_id, checks, null, failure, attempts);
       }
     });
   } finally {
     spinner.stop();
   }
+  for (const note of retryNotes) reporter.note(note);
 
   // Surface every keep-on-failure fallback loudly — the whole point of the
   // fallback is that the precision gate sat out, and that must never be silent
@@ -232,8 +255,9 @@ export const runSkeptic: RunSkeptic = async (input) => {
   const titleById = new Map(clusters.map((c) => [c.cluster_id, c.merged_title]));
   for (const r of results) {
     if (r.failure !== null && r.decision.action !== "drop") {
+      const retried = r.attempts > 1 ? ` after ${r.attempts} attempts` : "";
       reporter.warn(
-        `skeptic ${r.failure.kind === "timeout" ? "timed out" : `failed (${r.failure.kind})`} on ` +
+        `skeptic ${r.failure.kind === "timeout" ? "timed out" : `failed (${r.failure.kind})`}${retried} on ` +
           `"${titleById.get(r.cluster_id) ?? r.cluster_id}" — finding kept by recall-first fallback, unvalidated`,
       );
     }

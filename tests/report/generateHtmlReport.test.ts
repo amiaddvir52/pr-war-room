@@ -63,6 +63,7 @@ function skepticTimeout(cluster_id = "cluster-001"): SkepticResult {
       softened_from_model_action: null,
     },
     failure: { kind: "timeout", message: "timed out after 90000ms" },
+    attempts: 2,
   };
 }
 
@@ -240,6 +241,7 @@ describe("renderHtmlReport", () => {
               softened_from_model_classification: null,
             },
             failure: null,
+            attempts: 1,
           },
         ],
       }),

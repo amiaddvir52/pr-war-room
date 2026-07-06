@@ -59,6 +59,7 @@ function judgeDrop(cluster_id: string, reason = "low value / stylistic"): JudgeR
       softened_from_model_classification: null,
     },
     failure: null,
+    attempts: 1,
   };
 }
 
@@ -81,6 +82,7 @@ function skepticKeep(cluster_id = "cluster-001"): SkepticResult {
     },
     decision: { action: "keep", reason: "supported", softened_from_model_action: null },
     failure: null,
+    attempts: 1,
   };
 }
 
@@ -103,6 +105,7 @@ function skepticDrop(cluster_id: string, reason = "no supporting evidence"): Ske
     },
     decision: { action: "drop", reason, softened_from_model_action: null },
     failure: null,
+    attempts: 1,
   };
 }
 

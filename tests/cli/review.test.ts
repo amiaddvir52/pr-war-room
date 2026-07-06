@@ -304,6 +304,23 @@ describe("runReview (integration)", () => {
     expect(lines.some((line) => line.includes("Preset"))).toBe(false);
   });
 
+  it("says plainly when no config file is found (not a bare 'defaults')", async () => {
+    const lines: string[] = [];
+    const capturing = new Reporter({ color: false, out: (line) => lines.push(line), err: () => {} });
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, reporter: capturing }));
+    // The banner row names the missing file, and a note says exactly where we looked.
+    expect(lines.some((l) => l.includes("defaults") && l.includes(CONFIG_FILENAME))).toBe(true);
+    expect(lines.some((l) => l.includes("using built-in defaults"))).toBe(true);
+  });
+
+  it("names the loaded config file when one is present", async () => {
+    const lines: string[] = [];
+    const capturing = new Reporter({ color: false, out: (line) => lines.push(line), err: () => {} });
+    await writeFile(join(dir, CONFIG_FILENAME), JSON.stringify({ review: { maxFindings: 5 } }), "utf8");
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, reporter: capturing }));
+    expect(lines.some((l) => l.includes("Config loaded from"))).toBe(true);
+  });
+
   it("deduplicates the fan-out findings into finding_clusters.json (Phase 7)", async () => {
     const base: Omit<Finding, "id" | "source_agent" | "raw_agent_output_ref"> = {
       title: "user.profile may be undefined and crash rendering",
@@ -375,6 +392,7 @@ describe("runReview (integration)", () => {
       model_verdict: null,
       decision: { action: "drop", reason: "file is not in the changeset", softened_from_model_action: null },
       failure: null,
+      attempts: 1,
     };
     const sk = capturingSkeptic([dropResult]);
     await runReview(
@@ -390,6 +408,73 @@ describe("runReview (integration)", () => {
     ) as SkepticResult[];
     expect(written).toHaveLength(1);
     expect(written[0]?.decision.action).toBe("drop");
+  });
+
+  it("reports skeptic timeout fallbacks separately — never as 'supported by the skeptic'", async () => {
+    const lines: string[] = [];
+    const capturing = new Reporter({ color: false, out: (line) => lines.push(line), err: () => {} });
+    const oneFinding: RunReviewers = async () => ({
+      findings: [
+        {
+          id: "a-001",
+          source_agent: "reviewer_a",
+          raw_agent_output_ref: "raw/a.md",
+          title: "possible crash",
+          category: "correctness",
+          severity: "high",
+          confidence: 0.7,
+          file: "src/x.ts",
+          line_start: 10,
+          line_end: 12,
+          claim: "possible crash",
+          evidence: ["line 10 dereferences user.profile"],
+          suggested_fix: null,
+          suggested_test: null,
+          human_review_likelihood: 0.8,
+          needs_code_change: true,
+        },
+      ],
+      agents: [],
+    });
+    // The one finding dedups into cluster-001; the skeptic timed out on it and it
+    // was kept by the recall-first fallback (unvalidated).
+    const fallbackResult: SkepticResult = {
+      cluster_id: "cluster-001",
+      source: "fallback",
+      checks: {
+        hard_failures: [],
+        soft_warnings: [],
+        signals: { file_in_changeset: true, has_line_anchor: true, line_in_diff: true, line_near_diff: true },
+        notes: [],
+      },
+      model_verdict: null,
+      decision: {
+        action: "keep",
+        reason: "Skeptic could not complete (timeout: timed out) after 2 attempts; kept pending human review.",
+        softened_from_model_action: null,
+      },
+      failure: { kind: "timeout", message: "timed out after 120000ms" },
+      attempts: 2,
+    };
+    await runReview(
+      "https://github.com/org/repo/pull/123",
+      fakes({
+        cwd: dir,
+        runReviewers: oneFinding,
+        skeptic: capturingSkeptic([fallbackResult]).fn,
+        reporter: capturing,
+      }),
+    );
+    // Validated count excludes the fallback keep …
+    expect(lines.some((l) => l.includes("0/1") && l.includes("validated by the skeptic"))).toBe(true);
+    // … which is called out separately as unvalidated recall-first fallback …
+    expect(
+      lines.some(
+        (l) => l.includes("1/1") && l.includes("recall-first fallback") && l.includes("unvalidated"),
+      ),
+    ).toBe(true);
+    // … and never described as "supported by the skeptic".
+    expect(lines.some((l) => l.includes("supported by the skeptic"))).toBe(false);
   });
 
   it("skips the skeptic phase and writes no skeptic_results.json when disabled", async () => {
@@ -438,6 +523,7 @@ describe("runReview (integration)", () => {
         softened_from_model_classification: null,
       },
       failure: null,
+      attempts: 1,
     };
     const jg = capturingJudge([rankedResult]);
     await runReview(
@@ -737,6 +823,7 @@ describe("runReview (integration)", () => {
         softened_from_model_classification: null,
       },
       failure: null,
+      attempts: 1,
     };
     await runReview(
       "https://github.com/org/repo/pull/123",

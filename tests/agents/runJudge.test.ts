@@ -5,6 +5,7 @@ import { defaultConfig } from "../../src/config/defaultConfig.js";
 import type { Config } from "../../src/config/schema.js";
 import type { FindingCluster, JudgeVerdict, SkepticResult } from "../../src/findings/schema.js";
 import { silentReporter } from "../../src/ui/reporter.js";
+import { ReviewerTimeoutError } from "../../src/errors.js";
 import { makeReviewPacket } from "../fixtures/reviewPacket.js";
 
 function cluster(overrides: Partial<FindingCluster> = {}): FindingCluster {
@@ -59,6 +60,7 @@ function strongSkeptic(clusterId = "cluster-001"): SkepticResult {
     },
     decision: { action: "keep", reason: "supported", softened_from_model_action: null },
     failure: null,
+    attempts: 1,
   };
 }
 
@@ -241,7 +243,9 @@ describe("runJudge", () => {
     vi.useFakeTimers();
     try {
       const hang: Judge = () => new Promise<JudgeVerdict>(() => {}); // never resolves
-      const config = withConfig({ backend: "claude", timeoutMs: 1_000 });
+      // retries: 0 keeps this a single-attempt fallback test; retry behavior has
+      // its own dedicated test below.
+      const config = withConfig({ backend: "claude", timeoutMs: 1_000, retries: 0 });
       const promise = runJudge({
         clusters: [cluster()],
         skepticResults: [strongSkeptic()],
@@ -257,5 +261,28 @@ describe("runJudge", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("retries a judge that times out once, then uses the retry's verdict (attempts=2)", async () => {
+    let calls = 0;
+    const flaky: Judge = async () => {
+      calls++;
+      // First attempt times out; the retry classifies the finding.
+      if (calls === 1) throw new ReviewerTimeoutError("timed out after 90000ms");
+      return verdict({ final_classification: "blocker" });
+    };
+    const { ranked } = await runJudge({
+      clusters: [cluster()],
+      skepticResults: [strongSkeptic()],
+      packet: makeReviewPacket(),
+      config: withConfig({ backend: "claude", retries: 1 }),
+      reporter: silentReporter(),
+      makeJudge: () => flaky,
+    });
+    expect(calls).toBe(2);
+    expect(ranked[0]?.source).toBe("llm"); // ranked by the retry, not the fallback
+    expect(ranked[0]?.attempts).toBe(2);
+    expect(ranked[0]?.failure).toBeNull();
+    expect(ranked[0]?.decision.classification).toBe("blocker");
   });
 });

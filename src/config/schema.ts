@@ -88,6 +88,12 @@ export const AgentsConfigSchema = z
     concurrency: z.number().int().positive().default(4),
     // Default per-agent timeout in ms (a hung reviewer is recorded, not fatal).
     timeoutMs: z.number().int().positive().default(300_000),
+    // Extra attempts on a reviewer TIMEOUT (only). A single transient Claude CLI
+    // timeout should not remove a whole reviewer angle from the run, so we retry
+    // once by default before recording the reviewer as timed out. Refusals /
+    // parse failures / hard errors are NOT retried (deterministic — a re-run
+    // burns another call for the same result). 0 disables retries.
+    retries: z.number().int().nonnegative().default(1),
     // The review succeeds only when at least this many reviewers produce *usable*
     // output (findings, or a valid empty result). If fewer do — e.g. every
     // reviewer refused, timed out, or emitted unparseable output — the run fails
@@ -251,6 +257,11 @@ export const SkepticConfigSchema = z
     // (recall-first), never dropped on an infra hiccup. 120s (up from 60s):
     // demo runs hit 60s and even 90s on ordinary singleton clusters.
     timeoutMs: z.number().int().positive().default(120_000),
+    // Extra attempts on a skeptic TIMEOUT (only). A transient timeout would
+    // otherwise leave a cluster kept-but-unvalidated by the recall-first
+    // fallback; retrying once first means the precision gate actually runs when
+    // the second call succeeds. Non-timeout failures are not retried. 0 disables.
+    retries: z.number().int().nonnegative().default(1),
   })
   .default({});
 
@@ -272,6 +283,10 @@ export const JudgeConfigSchema = z
     // A judge that still hangs is recorded and the finding is classified
     // deterministically and kept (recall-first), never dropped.
     timeoutMs: z.number().int().positive().default(90_000),
+    // Extra attempts on a judge TIMEOUT (only), mirroring the skeptic — a
+    // transient timeout would otherwise rank a finding by the deterministic
+    // fallback instead of the model. Non-timeout failures are not retried.
+    retries: z.number().int().nonnegative().default(1),
   })
   .default({});
 

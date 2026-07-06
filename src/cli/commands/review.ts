@@ -1,6 +1,6 @@
 import { relative } from "node:path";
 import { parsePrUrl } from "../../github/parsePrUrl.js";
-import { loadConfig } from "../../config/loadConfig.js";
+import { loadConfig, CONFIG_FILENAME } from "../../config/loadConfig.js";
 import { getArtifactPaths } from "../../storage/artifactPaths.js";
 import { newRunId, writeLatestRunPointer } from "../../storage/latestRun.js";
 import { writeJsonArtifact, writeTextArtifact } from "../../storage/writeArtifact.js";
@@ -83,7 +83,7 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   const judge = options.judge ?? runJudge;
 
   const pr = parsePrUrl(prUrl);
-  const { config, source, path } = await loadConfig(cwd);
+  const { config, source, path, searchedPath } = await loadConfig(cwd);
   // Every review run gets its own artifact directory (`.ai-review/runs/<id>/`)
   // so a new run can never mix its outputs with a previous run's — the
   // stale-artifact failure the first demo exposed. `latest.json` points
@@ -118,7 +118,10 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
 
   const summary: ReadonlyArray<readonly [string, string]> = [
     ["PR", `${pr.owner}/${pr.repo}#${pr.number}`],
-    ["Config", source === "file" && path ? relative(cwd, path) : "defaults"],
+    // Name the actual file when one loaded; otherwise say plainly that no config
+    // file was found (not a bare "defaults" the user can't tell apart from a
+    // loaded config that happens to match the defaults).
+    ["Config", source === "file" && path ? relative(cwd, path) : `defaults — no ${CONFIG_FILENAME} found`],
     ...(config.agents.preset !== undefined
       ? [["Preset", config.agents.preset] as const]
       : []),
@@ -136,6 +139,16 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   reporter.blank();
   reporter.step("parsed PR URL");
   reporter.step("loaded config");
+  // Make config resolution debuggable: say exactly which file loaded, or exactly
+  // where we looked and failed to find one before falling back to defaults.
+  if (source === "file" && path) {
+    reporter.note(`Config loaded from ${artifactLink(path)}.`);
+  } else {
+    reporter.note(
+      `No ${CONFIG_FILENAME} at ${searchedPath} — using built-in defaults ` +
+        `(LLM dedup off, skeptic/judge/reviewer retries on). Create one there to customize.`,
+    );
+  }
   reporter.step(`wrote ${relative(paths.root, paths.runMetadata)}`);
 
   const result = await ingest(pr, { version: options.version, reporter });
@@ -279,9 +292,20 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
       `LLM dedup skipped — ${llmDedupSkipReason}; ${dedupStats.grayPairs} gray-zone pair${dedupStats.grayPairs === 1 ? "" : "s"} left unmerged (deterministic heuristics only).`,
     );
   } else {
+    // Full adjudication breakdown so the user can see exactly what the LLM pass
+    // did: how many gray-zone pairs existed, how many reached the model (some are
+    // already merged by the deterministic pass and skipped), how many it merged,
+    // how many it left, and any calls that failed/timed out (counted as no-merge).
+    const considered = dedupStats.grayPairs;
+    const sent = dedupStats.grayPairsAdjudicated;
+    const mergedByLlm = dedupStats.llmMerges;
+    const leftUnmerged = sent - mergedByLlm;
+    const failures = dedupStats.adjudicatorErrors;
     reporter.note(
-      `LLM dedup ran on ${dedupStats.grayPairsAdjudicated} gray-zone pair${dedupStats.grayPairsAdjudicated === 1 ? "" : "s"} ` +
-        `(${dedupStats.llmMerges} merged${dedupStats.adjudicatorErrors > 0 ? `, ${dedupStats.adjudicatorErrors} adjudicator errors treated as "don't merge"` : ""}).`,
+      `LLM dedup: ${considered} gray-zone pair${considered === 1 ? "" : "s"} considered, ` +
+        `${sent} sent to the adjudicator, ${mergedByLlm} merged, ${leftUnmerged} left unmerged` +
+        (failures > 0 ? `, ${failures} failed/timed out (treated as "don't merge")` : "") +
+        `.`,
     );
   }
 
@@ -298,12 +322,32 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
     skepticResults = results;
     candidates = selectSupportedClusters(clusters, results);
 
+    // Honest accounting: a cluster kept by the recall-first fallback (skeptic
+    // timeout / failure) was NOT validated, so it must not be counted as
+    // "supported by the skeptic". Split kept clusters into truly validated
+    // (LLM or deterministic verdict) vs unvalidated fallback keeps.
+    const kept = results.filter((r) => r.decision.action !== "drop");
+    const fallbackKept = kept.filter((r) => r.source === "fallback");
+    const validated = kept.length - fallbackKept.length;
+    const timedOut = fallbackKept.filter((r) => r.failure?.kind === "timeout").length;
     const droppedCount = clusters.length - candidates.length;
+    const total = clusters.length;
+    const dropNote = droppedCount > 0 ? ` (${droppedCount} dropped as unsupported)` : "";
     reporter.success(
-      `${candidates.length}/${clusters.length} cluster${clusters.length === 1 ? "" : "s"} supported by the skeptic` +
-        (droppedCount > 0 ? ` (${droppedCount} dropped as unsupported)` : "") +
-        ` — see ${artifactLink(paths.skeptic.results)}`,
+      `${validated}/${total} cluster${total === 1 ? "" : "s"} validated by the skeptic${dropNote} — ` +
+        `see ${artifactLink(paths.skeptic.results)}`,
     );
+    // Never fold fallback keeps into the "validated" count — call them out.
+    if (fallbackKept.length > 0) {
+      const timeoutNote =
+        timedOut > 0
+          ? ` (${timedOut} after skeptic timeout)`
+          : "";
+      reporter.warn(
+        `${fallbackKept.length}/${total} cluster${fallbackKept.length === 1 ? "" : "s"} kept by recall-first fallback, ` +
+          `unvalidated${timeoutNote} — kept for recall, NOT confirmed by the skeptic.`,
+      );
+    }
     for (const r of results.filter((res) => res.decision.action === "drop")) {
       const cluster = clusters.find((c) => c.cluster_id === r.cluster_id);
       reporter.warn(`dropped ${cluster?.merged_title ?? r.cluster_id} — ${r.decision.reason}`);

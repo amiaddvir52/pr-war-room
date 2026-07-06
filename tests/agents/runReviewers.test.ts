@@ -12,7 +12,7 @@ import type { AgentSpec, Config } from "../../src/config/types.js";
 import { FindingSchema } from "../../src/findings/schema.js";
 import type { FindingCore } from "../../src/findings/schema.js";
 import { ReviewerError, ReviewerTimeoutError } from "../../src/errors.js";
-import { silentReporter } from "../../src/ui/reporter.js";
+import { Reporter, silentReporter } from "../../src/ui/reporter.js";
 import { makeReviewPacket } from "../fixtures/reviewPacket.js";
 
 const packet = makeReviewPacket({
@@ -231,6 +231,69 @@ describe("runReviewers", () => {
       makeClient: () => client, // only called for the non-mock "cli_slow" agent
     });
     expect(byName(result.agents, "cli_slow").status).toBe("timeout");
+  });
+
+  it("retries a reviewer that times out once, then records the successful retry (attempts=2)", async () => {
+    const lines: string[] = [];
+    const capturing = new Reporter({ color: false, out: (l) => lines.push(l), err: () => {} });
+    let calls = 0;
+    const flaky: ModelClient = {
+      async complete() {
+        calls++;
+        // First attempt times out; the retry returns valid findings.
+        if (calls === 1) throw new ReviewerTimeoutError("The Claude CLI reviewer timed out after 300000ms");
+        return { text: JSON.stringify({ findings: [coreFinding()] }), stopReason: "end_turn" };
+      },
+    };
+    const reviewers: AgentSpec[] = [{ name: "flaky", backend: "claude", angle: "general", enabled: true }];
+    const result = await runReviewers({
+      packet,
+      packetMarkdown: "# packet",
+      config: configWith(reviewers, { retries: 1 }),
+      paths: getArtifactPaths(dir, "test-run"),
+      reporter: capturing,
+      makeClient: () => flaky,
+    });
+    const run = byName(result.agents, "flaky");
+    expect(run.status).toBe("ok");
+    expect(run.attempts).toBe(2);
+    expect(run.findingCount).toBe(1);
+    // The retry is surfaced to the user, not hidden.
+    expect(lines.some((l) => l.includes("flaky") && l.includes("retrying"))).toBe(true);
+  });
+
+  it("records the final timeout after exhausting reviewer retries", async () => {
+    let calls = 0;
+    const alwaysTimeout: ModelClient = {
+      async complete() {
+        calls++;
+        throw new ReviewerTimeoutError("timed out");
+      },
+    };
+    const reviewers: AgentSpec[] = [
+      { name: "slow", backend: "claude", angle: "general", enabled: true },
+      { name: "fast", backend: "mock", angle: "general", enabled: true },
+    ];
+    const paths = getArtifactPaths(dir, "test-run");
+    const result = await runReviewers({
+      packet,
+      packetMarkdown: "# packet",
+      config: configWith(reviewers, { retries: 2 }),
+      paths,
+      reporter: silentReporter(),
+      makeClient: () => alwaysTimeout,
+    });
+    const run = byName(result.agents, "slow");
+    expect(run.status).toBe("timeout");
+    expect(run.attempts).toBe(3); // initial attempt + 2 retries
+    expect(calls).toBe(3);
+    // agent_runs.json records the attempt count (schemaVersion 2).
+    const runs = JSON.parse(await readFile(paths.raw.agentRuns, "utf8")) as {
+      schemaVersion: number;
+      agents: AgentRun[];
+    };
+    expect(runs.schemaVersion).toBe(2);
+    expect(runs.agents.find((a) => a.name === "slow")?.attempts).toBe(3);
   });
 
   it("classifies a hard failure that merely mentions 'timed out' as failed, not timeout", async () => {

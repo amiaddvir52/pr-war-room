@@ -14,6 +14,7 @@ import type {
 } from "../../src/findings/schema.js";
 import type { PacketChangedFile } from "../../src/context/types.js";
 import { Reporter, silentReporter } from "../../src/ui/reporter.js";
+import { ReviewerTimeoutError } from "../../src/errors.js";
 import { makeReviewPacket } from "../fixtures/reviewPacket.js";
 
 const PASS: EvidenceChecks = {
@@ -295,7 +296,9 @@ describe("runSkeptic", () => {
     try {
       const hang: Skeptic = () => new Promise<SkepticVerdict>(() => {}); // never resolves
       const packet = makeReviewPacket({ changedFiles: [changedFile()] });
-      const config = withConfig({ backend: "claude", timeoutMs: 1_000 });
+      // retries: 0 keeps this a single-attempt fallback test; retry behavior has
+      // its own dedicated test below.
+      const config = withConfig({ backend: "claude", timeoutMs: 1_000, retries: 0 });
       const promise = runSkeptic({
         clusters: [cluster()],
         packet,
@@ -324,7 +327,7 @@ describe("runSkeptic", () => {
       const promise = runSkeptic({
         clusters: [cluster({ merged_title: "big merged cluster" })],
         packet,
-        config: withConfig({ backend: "claude", timeoutMs: 1_000 }),
+        config: withConfig({ backend: "claude", timeoutMs: 1_000, retries: 0 }),
         reporter: capturing,
         makeSkeptic: () => hang,
       });
@@ -338,6 +341,51 @@ describe("runSkeptic", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("retries a skeptic that times out once, then uses the retry's verdict (attempts=2)", async () => {
+    const packet = makeReviewPacket({ changedFiles: [changedFile()] });
+    let calls = 0;
+    const flaky: Skeptic = async () => {
+      calls++;
+      // First attempt times out; the retry produces a real verdict.
+      if (calls === 1) throw new ReviewerTimeoutError("timed out after 120000ms");
+      return verdict({ recommended_action: "keep", support_level: "strong" });
+    };
+    const { results } = await runSkeptic({
+      clusters: [cluster()],
+      packet,
+      config: withConfig({ backend: "claude", retries: 1 }),
+      reporter: silentReporter(),
+      makeSkeptic: () => flaky,
+    });
+    expect(calls).toBe(2);
+    expect(results[0]?.source).toBe("llm"); // validated by the retry, not a fallback
+    expect(results[0]?.attempts).toBe(2);
+    expect(results[0]?.decision.action).toBe("keep");
+    expect(results[0]?.failure).toBeNull();
+  });
+
+  it("keeps the finding by fallback after exhausting skeptic retries (attempts recorded)", async () => {
+    const packet = makeReviewPacket({ changedFiles: [changedFile()] });
+    let calls = 0;
+    const alwaysTimeout: Skeptic = async () => {
+      calls++;
+      throw new ReviewerTimeoutError("timed out after 120000ms");
+    };
+    const { results } = await runSkeptic({
+      clusters: [cluster()],
+      packet,
+      config: withConfig({ backend: "claude", retries: 1 }),
+      reporter: silentReporter(),
+      makeSkeptic: () => alwaysTimeout,
+    });
+    expect(calls).toBe(2); // initial + 1 retry
+    expect(results[0]?.source).toBe("fallback");
+    expect(results[0]?.failure?.kind).toBe("timeout");
+    expect(results[0]?.attempts).toBe(2);
+    expect(results[0]?.decision.action).toBe("keep");
+    expect(results[0]?.decision.reason).toContain("2 attempts");
   });
 
   it("scales the per-cluster timeout with cluster size (adaptive budget)", async () => {

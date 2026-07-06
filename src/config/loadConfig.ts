@@ -12,7 +12,14 @@ export const CONFIG_FILENAME = ".pr-war-room.json";
 export interface LoadedConfig {
   config: Config;
   source: "default" | "file";
+  /** Absolute path of the file actually loaded, or null when using defaults. */
   path: string | null;
+  /**
+   * Absolute path we looked for (`<cwd>/.pr-war-room.json`), whether or not it
+   * existed. Always set — so the CLI can say exactly where it looked when it
+   * falls back to defaults, instead of a bare "defaults" the user can't debug.
+   */
+  searchedPath: string;
 }
 
 /**
@@ -79,9 +86,12 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<LoadedCon
     raw = await readFile(path, "utf8");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      return { config: defaultConfig, source: "default", path: null };
+      return { config: defaultConfig, source: "default", path: null, searchedPath: path };
     }
-    throw new ConfigError(`Cannot read ${CONFIG_FILENAME}: ${(err as Error).message}`);
+    // Any other read error (permissions, a directory named .pr-war-room.json, …)
+    // is a real problem the user asked us to load — fail loudly, never silently
+    // fall back to defaults and pretend the file wasn't there.
+    throw new ConfigError(`Cannot read ${CONFIG_FILENAME} (${path}): ${(err as Error).message}`);
   }
 
   let userConfig: unknown;
@@ -91,5 +101,8 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<LoadedCon
     throw new ConfigError(`${CONFIG_FILENAME} (${path}) is not valid JSON`);
   }
 
-  return { config: mergeConfig(defaultConfig, userConfig), source: "file", path };
+  // A present-but-invalid config throws inside mergeConfig (ConfigError) rather
+  // than falling back to defaults — a config the user wrote but got wrong must
+  // fail loudly, not run silently on the defaults it was meant to replace.
+  return { config: mergeConfig(defaultConfig, userConfig), source: "file", path, searchedPath: path };
 }

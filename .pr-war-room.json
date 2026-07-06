@@ -1,0 +1,20 @@
+{
+  "agents": {
+    "preset": "demo",
+    "retries": 1
+  },
+  "dedup": {
+    "llm": {
+      "enabled": true,
+      "backend": "claude",
+      "timeoutMs": 60000
+    }
+  },
+  "skeptic": {
+    "timeoutMs": 120000,
+    "retries": 1
+  },
+  "judge": {
+    "retries": 1
+  }
+}
