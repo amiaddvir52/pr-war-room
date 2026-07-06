@@ -6,7 +6,7 @@ Run it on a PR *before* you request human review. It ingests the PR, builds a
 review context packet, runs multiple independent AI review agents, deduplicates
 and challenges their findings, ranks what a human reviewer would actually care
 about, and produces a short, actionable report — with optional local fix
-patches.
+patches. 
 
 > Goal: not to replace human review, but to make every PR significantly more
 > review-ready before a teammate ever looks at it.
