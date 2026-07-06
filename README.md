@@ -13,37 +13,55 @@ patches.
 
 ## Status
 
-This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–11** are
-implemented: the CLI skeleton, configuration system, PR-URL parsing, the
-`.ai-review/` artifact layout, **GitHub PR ingestion** (metadata, changed files,
-and diff), the **local workspace** (a shallow checkout of the PR head with
-project-type / package-manager / verification-command detection and optional
-verification runs), the **review packet** — a structured `review_packet.json`
-+ `review_packet.md` combining PR intent, diffs, nearby code context, detected
-repo conventions, and verification results — and the **multi-agent reviewer
-fan-out**: several independent review agents run in parallel against the packet,
-each with its own review angle, and their validated findings are merged into a
-single normalized set — then **deduplicated**: overlapping findings from
-different agents are clustered into one issue each (singletons included), so
-later phases see a de-duplicated set — then **evidence-validated by a skeptic**:
-each cluster is challenged with deterministic file/line/diff checks and (unless
-disabled) an LLM skeptic that tries to disprove it, so unsupported findings are
-dropped from the candidate list and only survivors move on — then **ranked by an
-LLM-as-a-judge**: each supported cluster is classified (`blocker`,
-`should_fix_before_review`, `nice_to_have`, or `drop`) and given a deterministic
-priority score, producing `judge/ranked_findings.json` (the full record,
-including drops and why) and `final_findings.json` (the report-ready subset) —
-and finally a **concise Markdown report** (`report.md`): findings grouped
-must-fix / should-fix / optional with their evidence and suggested fixes, a
-readiness verdict, the review funnel (raw → clustered → skeptic → ranked, with
-the dropped count), verification results, and links to the raw artifacts. It
-honours `review.maxFindings` / `review.includeNiceToHave` and degrades cleanly
-when the skeptic or judge is disabled. On top of that sits **fix mode**
-(`pr-war-room fix <pr-url>`): it selects the review's fixable findings, has a
-fix agent propose exact search/replace edits per finding, applies them to the
-workspace checkout, and produces `.ai-review/patch.diff` via `git diff` — a
-patch that is valid by construction — plus `fix_report.md` and
-`fix_verification.json`.
+The PRD (`Full PRD.rtf`) plans 15 phases. **Phases 1–11 are implemented** and
+covered by the test suite. Phases 12–15 (eval mode, team reviewer profile,
+GitHub publish, GitHub Action) are **not built yet** — see
+[Not yet implemented & the proof gap](#not-yet-implemented--the-proof-gap).
+
+A `review` run executes this pipeline, writing each stage's artifacts under
+`.ai-review/`:
+
+1. **Ingest** (Phase 2) — fetch the PR's metadata, changed files, and diff
+   from the GitHub REST API.
+2. **Workspace** (Phase 3) — shallow-clone the PR head into
+   `.ai-review/workspace/repo`; detect project type, package manager, and
+   verification commands; optionally run them (`--verify`).
+3. **Review packet** (Phase 4) — assemble a structured `review_packet.json` +
+   `review_packet.md`: PR intent, diffs, nearby code context, detected repo
+   conventions, and verification results.
+4. **Reviewer fan-out** (Phases 5–6) — run several independent review agents
+   in parallel against the packet, each a **backend × angle** persona;
+   validate each agent's output and merge it into one normalized findings set.
+5. **Dedup** (Phase 7) — cluster overlapping findings from different agents
+   into one issue each (singletons included), so later stages see each
+   underlying issue once.
+6. **Skeptic** (Phase 8) — challenge every cluster with deterministic
+   file/line/diff checks and (unless disabled) an LLM skeptic that tries to
+   disprove it; unsupported findings are dropped, recall-first.
+7. **Judge** (Phase 9) — classify each supported cluster (`blocker`,
+   `should_fix_before_review`, `nice_to_have`, or `drop`) and compute a
+   deterministic priority score, producing `judge/ranked_findings.json` (the
+   full record, drops included with reasons) and `final_findings.json` (the
+   report-ready subset).
+8. **Report** (Phase 10) — render `report.md`: findings grouped
+   must-fix / should-fix / optional with their evidence and suggested fixes, a
+   readiness verdict, the review funnel (raw → clustered → skeptic → ranked,
+   with the dropped count), verification results, and links to the raw
+   artifacts. Honours `review.maxFindings` / `review.includeNiceToHave` and
+   degrades cleanly when the skeptic or judge is disabled.
+
+On top of that sits **fix mode** (Phase 11, `pr-war-room fix <pr-url>`): it
+selects the review's fixable findings, has a fix agent propose exact
+search/replace edits per finding, applies them to the workspace checkout, and
+produces `.ai-review/patch.diff` via `git diff` — a patch that is valid by
+construction. It **never touches your working tree, never commits, never
+pushes, and never posts to GitHub**. Details under [Fix mode](#fix-mode).
+
+Every stage degrades cleanly: a reviewer that fails or times out is recorded
+and the run continues; a skeptic or judge call that can't complete keeps the
+finding rather than silently dropping it.
+
+### GitHub auth
 
 GitHub access uses `GITHUB_TOKEN` if set, otherwise `GH_TOKEN`, otherwise
 `GITHUB_PERSONAL_ACCESS_TOKEN` (the same token the GitHub MCP server uses, so if
@@ -51,6 +69,8 @@ you've set up GitHub MCP on `claude`/`codex` ingestion works with no extra
 setup), otherwise the `gh` CLI (`gh auth token`). If none is available the tool
 prints a setup message and exits. Ingestion stays a deterministic REST fetch —
 we reuse the MCP's credential rather than driving MCP tools through the CLI.
+
+### Reviewers: backends × angles
 
 The reviewer roster is a list of agents under `agents.reviewers`, run in
 parallel. Each agent is a **backend × angle**: the `backend` picks the model
@@ -116,7 +136,8 @@ pnpm build      # bundles to dist/ via tsup
 # During development (runs TypeScript directly via tsx):
 pnpm dev review https://github.com/org/repo/pull/123
 
-# After build (or when installed globally):
+# After `pnpm build` the bin is dist/cli/index.js; `pnpm link --global` puts
+# `pr-war-room` on your PATH:
 pr-war-room review https://github.com/org/repo/pull/123
 
 # Also run the detected/configured verification commands (install + test/lint/build):
@@ -129,34 +150,58 @@ pr-war-room fix https://github.com/org/repo/pull/123
 pr-war-room fix https://github.com/org/repo/pull/123 --apply --verify
 ```
 
-Every run writes artifacts under `.ai-review/` in the current directory:
-`run_metadata.json`; `github/pr_metadata.json`, `github/changed_files.json`, and
-`github/diff.patch` from the ingested PR; `workspace/repo/` (a shallow checkout of
-the PR head), `workspace/workspace_metadata.json`, and
-`verification/initial_verification.json`; the review packet at
-`context/review_packet.json` + `context/review_packet.md`; and the reviewer output —
-`raw/<agent>_review.md` (verbatim model output) and `raw/<agent>_findings.json` (that
-agent's validated findings) **per agent**, `raw/agent_runs.json` (which agents ran,
-failed, or timed out), `normalized/all_findings.json` (every agent's findings merged
-and normalized), `deduped/finding_clusters.json` (those findings merged into one
-cluster per underlying issue), `skeptic/skeptic_results.json` (each cluster's
-evidence-validation verdict), `judge/ranked_findings.json` (each supported
-cluster's classification + priority score, drops included with their reason),
-`final_findings.json` (the report-ready, non-dropped subset, most-important-first),
-and `report.md` (the concise, human-facing Markdown report).
+Global flags: `-q`/`--quiet` suppresses non-error output; `--no-color` disables
+colored output.
 
-A `fix` run adds: `patch.diff` (the unified diff of all applied fixes),
-`fix_report.md` (what was fixed, what wasn't and why, what still needs a human),
-`fix_results.json` (machine-readable per-finding outcomes),
-`fix_verification.json` (post-fix verification results, logs under
-`verification/fix-logs/`), and `fix_metadata.json` (the fix run's own record —
-the review's `run_metadata.json` is never overwritten).
+Every `review` run writes artifacts under `.ai-review/` in the current directory:
+
+```text
+.ai-review/
+├── run_metadata.json               # the review run's record
+├── github/
+│   ├── pr_metadata.json            # ingested PR metadata
+│   ├── changed_files.json
+│   └── diff.patch
+├── workspace/
+│   ├── repo/                       # shallow checkout of the PR head
+│   └── workspace_metadata.json     # detected project type / package manager / commands
+├── verification/
+│   ├── initial_verification.json   # command results (commands execute only with --verify)
+│   └── logs/
+├── context/
+│   ├── review_packet.json          # the structured review packet
+│   └── review_packet.md
+├── raw/
+│   ├── <agent>_review.md           # verbatim model output, per agent
+│   ├── <agent>_findings.json       # that agent's validated findings, per agent
+│   └── agent_runs.json             # which agents ran, failed, timed out, or were skipped
+├── normalized/
+│   └── all_findings.json           # every agent's findings, merged and normalized
+├── deduped/
+│   └── finding_clusters.json       # one cluster per underlying issue
+├── skeptic/
+│   └── skeptic_results.json        # each cluster's evidence-validation verdict
+├── judge/
+│   └── ranked_findings.json        # every cluster's classification + score, drops included
+├── final_findings.json             # report-ready non-dropped subset, most-important-first
+└── report.md                       # the concise, human-facing Markdown report
+```
+
+A `fix` run adds (never overwriting the review's `run_metadata.json`):
+
+```text
+.ai-review/
+├── patch.diff                      # unified diff of all applied fixes
+├── fix_report.md                   # what was fixed, what wasn't and why
+├── fix_results.json                # machine-readable per-finding outcomes
+├── fix_verification.json           # post-fix verification results
+├── fix_metadata.json               # the fix run's own record
+└── verification/fix-logs/          # post-fix verification logs
+```
 
 Verification is **opt-in**: detection always runs, but commands only execute with
 `--verify` (or `verification.enabled: true`). This matters because running a PR's
 scripts executes its code locally. Add `.ai-review/` to your ignore rules.
-
-`eval` is registered but not yet implemented.
 
 ### Fix mode
 
@@ -180,6 +225,28 @@ publishes comments**. `--verify` (or `verification.enabled: true`) re-runs the
 detected/configured verification commands against the patched checkout and
 records the outcome in `fix_verification.json`; with `fix.backend: "mock"` the
 whole flow runs offline with a deterministic placeholder fixer.
+
+## Not yet implemented & the proof gap
+
+PRD phases 12–15 are future work. None of them run today:
+
+- **Eval mode (Phase 12).** `pr-war-room eval --repo <path> --prs <n>` is
+  registered but is a stub — it prints "not yet implemented" and exits.
+  The `.ai-review/eval/` artifact paths are reserved; nothing writes them.
+- **Team reviewer profile (Phase 13).** Not implemented. Only the
+  `team_profile.md` / `team_profile.json` artifact paths are reserved.
+- **GitHub publish mode (Phase 14).** Not implemented. The tool never posts
+  review comments — or anything else — to GitHub; all output is local files.
+- **GitHub Action / CI integration (Phase 15).** Not implemented; there is no
+  action or workflow to install. The `ci` config keys (`ci.failOnBlocker`,
+  `ci.publishSummary`) are accepted but **inert**, pre-declared so configs
+  that set them keep working when Phase 15 lands.
+
+**The proof gap:** the pipeline runs end-to-end, but the product's core claim
+— that its findings match what a human reviewer would actually flag — has not
+been measured. Measuring it is exactly what eval mode is for (replay
+historical PRs and compare AI findings against the human review comments);
+until it exists, judge the output by reading `report.md` on your own PRs.
 
 ## Configuration
 
@@ -287,6 +354,10 @@ Stale `models.*` keys are rejected with an error pointing to their new home, so
 an upgraded config fails loudly instead of silently switching backends:
 `models.primaryReviewer` / `models.secondaryReviewer` moved to `agents.reviewers`
 (Phase 6), and `models.judge` moved to `judge.backend` (Phase 9).
+
+`review.maxFindings` caps how many findings `report.md` displays;
+`review.includeNiceToHave` (default `false`) controls whether `nice_to_have`
+findings appear in the report.
 
 `context.maxPacketBytes` soft-caps the review packet (largest patches are trimmed
 with a warning if exceeded); `context.nearbyContextLines` sets how much
