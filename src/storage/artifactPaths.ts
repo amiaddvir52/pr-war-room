@@ -45,7 +45,17 @@ export interface ArtifactPaths {
   reportMd: string;
 
   // Phase 11 — fix mode
-  fix: { patch: string; report: string; verification: string };
+  fix: {
+    /** Fix-run metadata — separate from `runMetadata` so `fix` never clobbers the review's record. */
+    metadata: string;
+    patch: string;
+    report: string;
+    /** Machine-readable per-finding outcomes. */
+    results: string;
+    verification: string;
+    /** Post-fix verification logs — separate from the review's `verification/logs`. */
+    logsDir: string;
+  };
 
   // Phase 12 — eval mode
   eval: { dir: string; results: string; report: string };
@@ -114,9 +124,12 @@ export function getArtifactPaths(baseDir: string): ArtifactPaths {
     reportMd: p("report.md"),
 
     fix: {
+      metadata: p("fix_metadata.json"),
       patch: p("patch.diff"),
       report: p("fix_report.md"),
+      results: p("fix_results.json"),
       verification: p("fix_verification.json"),
+      logsDir: p("verification", "fix-logs"),
     },
 
     eval: {

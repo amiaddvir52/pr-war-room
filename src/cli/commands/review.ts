@@ -1,3 +1,4 @@
+import { rm } from "node:fs/promises";
 import { relative } from "node:path";
 import { parsePrUrl } from "../../github/parsePrUrl.js";
 import { loadConfig } from "../../config/loadConfig.js";
@@ -102,6 +103,11 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
     cwd,
   });
   await writeJsonArtifact(paths.runMetadata, metadata);
+  // A previous run's final_findings.json must not survive into this run: if
+  // this review aborts before rewriting it, `fix` would otherwise pass its
+  // PR-provenance check (run_metadata.json now names THIS PR) while consuming
+  // the OLD run's findings.
+  await rm(paths.finalFindings, { force: true });
 
   const summary: ReadonlyArray<readonly [string, string]> = [
     ["PR", `${pr.owner}/${pr.repo}#${pr.number}`],

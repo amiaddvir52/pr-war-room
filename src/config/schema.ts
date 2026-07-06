@@ -238,6 +238,26 @@ export const JudgeConfigSchema = z
   .default({});
 
 /**
+ * Fix mode (Phase 11, PRD §10.10). No `enabled` key: running `pr-war-room fix`
+ * is explicit intent, and a config that turns an explicit command into a no-op
+ * is a footgun. The fix agent runs one model call per selected finding.
+ */
+export const FixConfigSchema = z
+  .object({
+    backend: ReviewerBackendSchema.default("claude"),
+    // Per-finding timeout in ms. Patch generation reads a whole file and writes
+    // edits, so this is deliberately above the skeptic/judge verdict timeouts.
+    timeoutMs: z.number().int().positive().default(120_000),
+    // Cap on findings attempted per run, taken from the head of
+    // final_findings.json (already sorted blocker-first, score-descending).
+    maxFindings: z.number().int().positive().default(5),
+  })
+  // Strict so a typo'd key (`maxFindngs`) fails loudly instead of silently
+  // falling back to the default cap (FOLLOWUPS #8).
+  .strict()
+  .default({});
+
+/**
  * CI options are pre-declared (optional/inert) so a config can already set them
  * and Phase 15 can activate them without breaking existing configs.
  */
@@ -260,6 +280,7 @@ export const ConfigSchema = z
     dedup: DedupConfigSchema,
     skeptic: SkepticConfigSchema,
     judge: JudgeConfigSchema,
+    fix: FixConfigSchema,
     ci: CiConfigSchema.optional(),
   })
   // Reject unknown top-level keys so typos in a user config fail loudly.
@@ -276,5 +297,6 @@ export type ContextConfig = z.infer<typeof ContextConfigSchema>;
 export type DedupConfig = z.infer<typeof DedupConfigSchema>;
 export type SkepticConfig = z.infer<typeof SkepticConfigSchema>;
 export type JudgeConfig = z.infer<typeof JudgeConfigSchema>;
+export type FixConfig = z.infer<typeof FixConfigSchema>;
 export type CiConfig = z.infer<typeof CiConfigSchema>;
 export type Config = z.infer<typeof ConfigSchema>;

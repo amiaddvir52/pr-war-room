@@ -3,7 +3,7 @@ import type { ReviewPacket } from "../context/types.js";
 import { JudgeError } from "../errors.js";
 import type { FindingCluster, JudgeVerdict, SkepticResult } from "../findings/schema.js";
 import { JudgeVerdictSchema, JUDGE_OUTPUT_JSON_SCHEMA } from "../findings/schema.js";
-import { extractJsonObjects } from "../util/extractJsonObjects.js";
+import { parseLastValidObject } from "../util/parseLastValidObject.js";
 import { createModelClient } from "./modelClient.js";
 import { buildJudgeSystemPrompt, buildJudgeUserPrompt } from "./prompts/judgePrompt.js";
 import type { ModelClient } from "./types.js";
@@ -29,26 +29,11 @@ export type Judge = (
 ) => Promise<JudgeVerdict>;
 
 /**
- * Extract every brace-balanced `{…}` object from `text` and return the LAST one
- * that parses as a valid verdict. A reasoning model states its conclusion last,
- * so keeping the last valid object ignores earlier illustrative/example objects.
- * Uses the shared string-aware extractor, so a lone unbalanced quote in the
- * model's prose can't swallow the real verdict. Returns `null` when none parse.
+ * Return the LAST brace-balanced object in `text` that parses as a valid
+ * verdict (see `parseLastValidObject` for why last-wins), or `null`.
  */
 export function parseJudgeVerdict(text: string): JudgeVerdict | null {
-  let decided: JudgeVerdict | null = null;
-  for (const candidate of extractJsonObjects(text)) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(candidate);
-    } catch {
-      // Balanced braces but not valid JSON (e.g. `{x}`) — skip it.
-      continue;
-    }
-    const result = JudgeVerdictSchema.safeParse(parsed);
-    if (result.success) decided = result.data;
-  }
-  return decided;
+  return parseLastValidObject(text, JudgeVerdictSchema);
 }
 
 /**

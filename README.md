@@ -13,7 +13,7 @@ patches.
 
 ## Status
 
-This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–10** are
+This repo is being built in phases (see `Full PRD.rtf`). **Phases 1–11** are
 implemented: the CLI skeleton, configuration system, PR-URL parsing, the
 `.ai-review/` artifact layout, **GitHub PR ingestion** (metadata, changed files,
 and diff), the **local workspace** (a shallow checkout of the PR head with
@@ -38,7 +38,12 @@ must-fix / should-fix / optional with their evidence and suggested fixes, a
 readiness verdict, the review funnel (raw → clustered → skeptic → ranked, with
 the dropped count), verification results, and links to the raw artifacts. It
 honours `review.maxFindings` / `review.includeNiceToHave` and degrades cleanly
-when the skeptic or judge is disabled.
+when the skeptic or judge is disabled. On top of that sits **fix mode**
+(`pr-war-room fix <pr-url>`): it selects the review's fixable findings, has a
+fix agent propose exact search/replace edits per finding, applies them to the
+workspace checkout, and produces `.ai-review/patch.diff` via `git diff` — a
+patch that is valid by construction — plus `fix_report.md` and
+`fix_verification.json`.
 
 GitHub access uses `GITHUB_TOKEN` if set, otherwise `GH_TOKEN`, otherwise
 `GITHUB_PERSONAL_ACCESS_TOKEN` (the same token the GitHub MCP server uses, so if
@@ -116,6 +121,12 @@ pr-war-room review https://github.com/org/repo/pull/123
 
 # Also run the detected/configured verification commands (install + test/lint/build):
 pr-war-room review https://github.com/org/repo/pull/123 --verify
+
+# After a review: generate a local fix patch for the fixable findings.
+pr-war-room fix https://github.com/org/repo/pull/123
+
+# Keep the fixes applied in the workspace checkout, and verify the patched code:
+pr-war-room fix https://github.com/org/repo/pull/123 --apply --verify
 ```
 
 Every run writes artifacts under `.ai-review/` in the current directory:
@@ -134,11 +145,41 @@ cluster's classification + priority score, drops included with their reason),
 `final_findings.json` (the report-ready, non-dropped subset, most-important-first),
 and `report.md` (the concise, human-facing Markdown report).
 
+A `fix` run adds: `patch.diff` (the unified diff of all applied fixes),
+`fix_report.md` (what was fixed, what wasn't and why, what still needs a human),
+`fix_results.json` (machine-readable per-finding outcomes),
+`fix_verification.json` (post-fix verification results, logs under
+`verification/fix-logs/`), and `fix_metadata.json` (the fix run's own record —
+the review's `run_metadata.json` is never overwritten).
+
 Verification is **opt-in**: detection always runs, but commands only execute with
 `--verify` (or `verification.enabled: true`). This matters because running a PR's
 scripts executes its code locally. Add `.ai-review/` to your ignore rules.
 
-`fix` and `eval` are registered but not yet implemented.
+`eval` is registered but not yet implemented.
+
+### Fix mode
+
+`pr-war-room fix <pr-url>` reads the latest review run's `final_findings.json`
+(so run `review` first, with the judge enabled) and attempts the findings that
+need a code change and were ranked `blocker` or `should_fix_before_review` —
+highest priority first, capped by `fix.maxFindings`. Instead of asking the model
+for a diff (LLM-emitted diffs are brittle), the fix agent returns **exact
+search/replace edits**; the tool applies them to the workspace checkout at
+`.ai-review/workspace/repo` — pinned to the reviewed commit when possible — and
+generates `patch.diff` with `git diff`, so the patch always applies cleanly. A
+finding whose fix fails (model refusal, timeout, or edits that don't match the
+file) is recorded in the report and skipped; it never aborts the run. Edits are
+restricted to files the PR changed.
+
+By default the workspace is reverted after the patch is written (**patch-only**);
+`--apply` leaves the workspace checkout patched instead. Either way, take the
+changes into your own tree with `git apply .ai-review/patch.diff` — the tool
+**never touches your working tree, never commits, never pushes, and never
+publishes comments**. `--verify` (or `verification.enabled: true`) re-runs the
+detected/configured verification commands against the patched checkout and
+records the outcome in `fix_verification.json`; with `fix.backend: "mock"` the
+whole flow runs offline with a deterministic placeholder fixer.
 
 ## Configuration
 
@@ -190,6 +231,11 @@ the current directory, in which case it is deep-merged over the defaults
     "backend": "claude",
     "concurrency": 4,
     "timeoutMs": 60000
+  },
+  "fix": {
+    "backend": "claude",
+    "timeoutMs": 120000,
+    "maxFindings": 5
   }
 }
 ```
@@ -295,6 +341,15 @@ deterministically with no model call (offline / CI / demo); if the judge can't
 run for a cluster it is classified deterministically and kept, never dropped.
 `ranked_findings.json` holds every cluster (drops included, with reasons);
 `final_findings.json` holds the non-dropped subset, most-important-first.
+
+`fix` (Phase 11) controls fix mode. There is deliberately **no `enabled` key** —
+running `pr-war-room fix` is explicit intent. `backend` picks the model the fix
+agent runs on (same choices as the reviewers; `"mock"` is a deterministic
+offline fixer); `timeoutMs` bounds each per-finding call (higher than the
+skeptic/judge defaults — generating a patch reads a whole file); `maxFindings`
+caps how many findings are attempted per run, taken from the top of the
+already-priority-sorted `final_findings.json`. One model call is made per
+finding, sequentially, so each fix sees the previous fixes' edits.
 
 ## Development
 

@@ -133,3 +133,102 @@ export async function prepareRepo(input: PrepareRepoInput): Promise<PreparedRepo
     throw toWorkspaceError(err, token);
   }
 }
+
+/**
+ * The working tree's unstaged diff against HEAD — how fix mode turns applied
+ * edits into `patch.diff`. Because we run the edits and git produces the diff,
+ * the patch is valid by construction (vs. asking a model to emit one). The
+ * output format is pinned against the user's global git config: a
+ * `diff.noprefix=true`, `diff.external`, `color.diff=always`, or textconv
+ * driver in ~/.gitconfig would otherwise make the emitted patch unusable by
+ * the documented `git apply .ai-review/patch.diff`.
+ */
+export async function gitDiff(repoDir: string, runner?: GitRunner): Promise<string> {
+  const run = runner ?? defaultGitRunner;
+  try {
+    const { stdout } = await run([
+      "-C",
+      repoDir,
+      "-c",
+      "diff.noprefix=false",
+      "diff",
+      "--no-ext-diff",
+      "--no-color",
+      "--no-textconv",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+    ]);
+    return stdout;
+  } catch (err) {
+    throw toWorkspaceError(err, null);
+  }
+}
+
+/**
+ * Discard all working-tree changes, restoring the checkout to HEAD. Same
+ * semantics as the prepare-time cleanup: `clean -fd` without `-x` keeps ignored
+ * files (node_modules/venv) so a later install-skip reuse still works.
+ */
+export async function restoreWorkspace(repoDir: string, runner?: GitRunner): Promise<void> {
+  const run = runner ?? defaultGitRunner;
+  try {
+    await run(["-C", repoDir, "reset", "--hard", "HEAD"]);
+    await run(["-C", repoDir, "clean", "-fd"]);
+  } catch (err) {
+    throw toWorkspaceError(err, null);
+  }
+}
+
+export interface EnsureWorkspaceInput extends PrepareRepoInput {
+  /**
+   * The head sha the review run checked out (from `workspace_metadata.json`),
+   * or null when unknown — unknown always re-fetches.
+   */
+  expectedHeadSha: string | null;
+}
+
+export interface EnsuredWorkspace extends PreparedRepo {
+  /** True when the PR head moved since the review — findings may be stale. */
+  headMoved: boolean;
+}
+
+/**
+ * Make sure `repoDir` is a clean checkout of the PR head for fix mode.
+ *
+ * When the review's checkout is still present at the sha the findings were
+ * produced against, it is cleaned in place — no fetch, which both works offline
+ * and deliberately pins the fixes to the *reviewed* commit. Otherwise it falls
+ * back to a full `prepareRepo` (fetch + checkout) and reports `headMoved` so
+ * the caller can warn that the findings may no longer match the code.
+ */
+export async function ensurePrHeadWorkspace(
+  input: EnsureWorkspaceInput,
+): Promise<EnsuredWorkspace> {
+  const runner = input.runner ?? defaultGitRunner;
+  const { repoDir, expectedHeadSha } = input;
+
+  if (expectedHeadSha !== null && (await exists(join(repoDir, ".git")))) {
+    try {
+      const { stdout } = await runner(["-C", repoDir, "rev-parse", "HEAD"]);
+      if (stdout.trim() === expectedHeadSha) {
+        await restoreWorkspace(repoDir, runner);
+        return {
+          repoDir,
+          remote: `https://github.com/${input.owner}/${input.repo}.git`,
+          ref: `pull/${input.number}/head`,
+          headSha: expectedHeadSha,
+          reused: true,
+          headMoved: false,
+        };
+      }
+    } catch {
+      // Unreadable checkout (corrupt .git, etc.) — fall through to a fresh prepare.
+    }
+  }
+
+  const prepared = await prepareRepo(input);
+  return {
+    ...prepared,
+    headMoved: expectedHeadSha !== null && prepared.headSha !== expectedHeadSha,
+  };
+}

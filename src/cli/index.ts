@@ -47,9 +47,24 @@ export function buildProgram(version: string): Command {
   program
     .command("fix")
     .argument("<pr-url>", "GitHub pull request URL")
-    .description("Generate local fix patches for findings (not yet implemented)")
-    .action(async (prUrl: string) => {
-      await runFix(prUrl, { reporter: reporterFor() });
+    .description(
+      "Generate a local fix patch (.ai-review/patch.diff) for the latest review's findings",
+    )
+    .option(
+      "--apply",
+      "leave the fixes applied in the workspace checkout (.ai-review/workspace/repo); never touches your own tree",
+    )
+    .option(
+      "--verify",
+      "run verification commands (install deps, then test/lint/build) against the patched workspace",
+    )
+    .action(async (prUrl: string, options: { apply?: boolean; verify?: boolean }) => {
+      await runFix(prUrl, {
+        version,
+        reporter: reporterFor(),
+        ...(options.apply ? { apply: true } : {}),
+        ...(options.verify ? { verify: true } : {}),
+      });
     });
 
   program

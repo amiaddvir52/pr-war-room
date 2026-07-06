@@ -68,4 +68,12 @@ export const defaultConfig: Config = {
     concurrency: 4,
     timeoutMs: 60_000,
   },
+  // Phase 11 — fix mode. One model call per selected finding; the cap takes
+  // the highest-priority findings first. No `enabled` key — running `fix` is
+  // explicit intent.
+  fix: {
+    backend: "claude",
+    timeoutMs: 120_000,
+    maxFindings: 5,
+  },
 };

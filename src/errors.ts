@@ -1,4 +1,5 @@
 import type { JudgeFailureKind, SkepticFailureKind } from "./findings/schema.js";
+import type { FixFailureKind } from "./fix/schema.js";
 
 /**
  * Typed CLI errors. Each carries an `exitCode` so the top-level error boundary
@@ -97,6 +98,36 @@ export class JudgeError extends ReviewerError {
   constructor(message: string, kind: JudgeFailureKind) {
     super(message);
     this.name = "JudgeError";
+    this.kind = kind;
+  }
+}
+
+/**
+ * Fix-mode structural failure (Phase 11): missing/invalid review artifacts, or
+ * the findings on disk belong to a different PR. Per-finding fix problems are
+ * NOT this — they flow through `FixAgentError` and are recorded in the report.
+ * Exit code 7.
+ */
+export class FixError extends CliError {
+  constructor(message: string) {
+    super(message, 7);
+    this.name = "FixError";
+  }
+}
+
+/**
+ * A soft per-finding fix-agent failure (refusal / truncation / backend error /
+ * unparseable proposal), mirroring `SkepticError`/`JudgeError`. A subclass of
+ * `ReviewerError` so existing `instanceof ReviewerError` handling applies, with
+ * a structured `kind` so `runFixes` can record the outcome without matching on
+ * message text. `timeout` failures keep flowing through `ReviewerTimeoutError`.
+ */
+export class FixAgentError extends ReviewerError {
+  readonly kind: FixFailureKind;
+
+  constructor(message: string, kind: FixFailureKind) {
+    super(message);
+    this.name = "FixAgentError";
     this.kind = kind;
   }
 }

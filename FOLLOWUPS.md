@@ -6,26 +6,27 @@ expansion). The four **report-renderer correctness bugs** from that review are
 already fixed and covered by regression tests; these are quality-only
 follow-ups (no behavior bug) deferred to a later pass.
 
-## 1. Extract the tolerant "parse last valid JSON object" loop (reuse)
+## 1. Extract the tolerant "parse last valid JSON object" loop (reuse) — PARTIALLY DONE
 
-`parseJudgeVerdict` in `src/agents/JudgeAgent.ts` is a near-byte-for-byte copy
-of `parseSkepticVerdict` in `src/agents/SkepticAgent.ts`; the same
-extract → `JSON.parse` → `schema.safeParse` → keep-last-valid loop also lives in
-`src/agents/DedupAdjudicator.ts`. That's a 4th copy. Extract a shared
-`parseLastValidObject(text, zodSchema)` beside `src/util/extractJsonObjects.ts`
-and have all three call it, so a parsing fix (e.g. accepting a top-level array,
-or switching keep-last→keep-first) is applied once.
+**Phase 11 extracted the shared util**: `parseLastValidObject(text, zodSchema)`
+now lives in `src/util/parseLastValidObject.ts`, and `parseJudgeVerdict`
+(`src/agents/JudgeAgent.ts`) and `parseFixProposal` (`src/agents/FixAgent.ts`)
+delegate to it. Still pending: migrate `parseSkepticVerdict`
+(`src/agents/SkepticAgent.ts`), `src/agents/DedupAdjudicator.ts`, and the
+reviewer parser so a parsing fix is applied once everywhere.
 
 ## 2. Share the reviewer soft-failure plumbing (reuse)
 
 `classifyFailure` in `src/agents/runJudge.ts` is identical to the one in
-`src/agents/runSkeptic.ts`, and the `stopReason → failure-kind` block in
-`JudgeAgent.ts` duplicates the one in `SkepticAgent.ts` (and the stopReason
-triple in `DedupAdjudicator.ts`). Both `JudgeError` and `SkepticError` are
-`ReviewerError`-with-`kind` subclasses, so a single
-`classifyReviewerFailure(err)` and a `stopReasonToFailureKind(stopReason)` (or
-`assertUsableCompletion(result)`) could back all of them and stop the judge and
-skeptic from classifying the same backend failure under different kinds.
+`src/agents/runSkeptic.ts` (and Phase 11 added a third sibling in
+`src/fix/runFixes.ts`), and the `stopReason → failure-kind` block in
+`JudgeAgent.ts` duplicates the one in `SkepticAgent.ts` (plus the stopReason
+triple in `DedupAdjudicator.ts` and now `FixAgent.ts`). `JudgeError`,
+`SkepticError`, and `FixAgentError` are all `ReviewerError`-with-`kind`
+subclasses, so a single `classifyReviewerFailure(err)` and a
+`stopReasonToFailureKind(stopReason)` (or `assertUsableCompletion(result)`)
+could back all of them and stop the phases from classifying the same backend
+failure under different kinds.
 
 ## 3. Single sort comparator for finding order (reuse)
 
@@ -81,8 +82,8 @@ schema-re-parse) on that path, or `Object.freeze` the exported default.
 
 ## 8. Consider `.strict()` for the remaining config sub-schemas (consistency)
 
-`AgentSpecSchema` and `AgentsConfigSchema` are now `.strict()`, so a typo'd
-`preset` key or per-agent field key fails loudly. The other sub-schemas
+`AgentSpecSchema`, `AgentsConfigSchema`, and the Phase-11 `FixConfigSchema` are
+`.strict()`, so a typo'd key fails loudly. The other sub-schemas
 (`verification`, `review`, `context`, `dedup`, `skeptic`, `judge`, `ci`) still
 strip unknown keys silently — the same footgun at lower stakes (e.g.
 `{"skeptic": {"concurency": 8}}` is a silent no-op). Sweep them in one pass,

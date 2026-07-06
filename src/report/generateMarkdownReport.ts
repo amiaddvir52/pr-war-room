@@ -1,4 +1,3 @@
-import { dirname, relative } from "node:path";
 import type {
   PacketVerification,
   PacketVerificationCommand,
@@ -18,6 +17,7 @@ import {
   deterministicClassification,
 } from "../findings/scoreFindings.js";
 import type { ArtifactPaths } from "../storage/artifactPaths.js";
+import { fence, link, plural, sanitizeInline } from "./markdownHelpers.js";
 
 /**
  * Phase 10 — Markdown report generation (PRD §10.9). A PURE, IO-free renderer:
@@ -516,40 +516,4 @@ function renderRawArtifacts(input: ReportInput): string[] {
   return out;
 }
 
-/* -------------------------------- helpers -------------------------------- */
-
-/** A markdown link from `report.md` to a sibling artifact, path relative to `.ai-review/`. */
-function link(reportMd: string, target: string): string {
-  const rel = relative(dirname(reportMd), target);
-  return `[${rel}](${rel})`;
-}
-
-function fence(body: string, lang = ""): string {
-  // The delimiter must be longer than any backtick run inside `body`, or
-  // untrusted content (LLM suggestions, subprocess output) that contains its
-  // own ``` fence would close this one early and corrupt the rest of the
-  // report. Grow it to one more than the longest internal run (min 3) instead
-  // of mutating the content, so what we render matches the model verbatim.
-  const longestRun = Math.max(0, ...[...body.matchAll(/`+/g)].map((m) => m[0].length));
-  const ticks = "`".repeat(Math.max(3, longestRun + 1));
-  return `${ticks}${lang}\n${body}\n${ticks}`;
-}
-
-/**
- * Prepare untrusted text for an INLINE markdown context (a `###` heading, a
- * list item, a link label): collapse every kind of line break — including a
- * standalone `\r` — to a space, then backslash-escape the metacharacters that
- * would otherwise inject structure (code spans, links/images, emphasis, raw
- * HTML, table cells). NEVER use this on fenced code/output blocks — escaping
- * would corrupt the very content those blocks exist to show verbatim.
- */
-function sanitizeInline(s: string): string {
-  return s
-    .replace(/[\r\n]+/g, " ")
-    .replace(/[\\`*_[\]<>~|]/g, "\\$&")
-    .trim();
-}
-
-function plural(n: number, word: string): string {
-  return n === 1 ? word : `${word}s`;
-}
+/* ------- helpers: link/fence/sanitizeInline/plural in markdownHelpers.ts ------- */

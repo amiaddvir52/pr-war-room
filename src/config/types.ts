@@ -15,5 +15,6 @@ export type {
   DedupConfig,
   SkepticConfig,
   JudgeConfig,
+  FixConfig,
   CiConfig,
 } from "./schema.js";
