@@ -54,7 +54,7 @@ describe("prepareWorkspace", () => {
 
   beforeEach(async () => {
     cwd = await mkdtemp(join(tmpdir(), "prwr-ws-"));
-    const repoDir = getArtifactPaths(cwd).workspace.repo;
+    const repoDir = getArtifactPaths(cwd, "test-run").workspace.repo;
     await mkdir(repoDir, { recursive: true });
     await writeFile(join(repoDir, "package.json"), JSON.stringify({ scripts: { test: "vitest" } }), "utf8");
     await writeFile(join(repoDir, "package-lock.json"), "{}", "utf8");
@@ -64,7 +64,7 @@ describe("prepareWorkspace", () => {
   });
 
   async function readJson(...segments: string[]): Promise<Record<string, unknown>> {
-    const raw = await readFile(join(cwd, ".ai-review", ...segments), "utf8");
+    const raw = await readFile(join(cwd, ".ai-review", "runs", "test-run", ...segments), "utf8");
     return JSON.parse(raw) as Record<string, unknown>;
   }
 
@@ -74,7 +74,7 @@ describe("prepareWorkspace", () => {
     const result = await prepareWorkspace({
       pr: PR,
       config: defaultConfig,
-      paths: getArtifactPaths(cwd),
+      paths: getArtifactPaths(cwd, "test-run"),
       cwd,
       token: null,
       gitRunner: git.runner,
@@ -97,7 +97,7 @@ describe("prepareWorkspace", () => {
     expect(result.metadata.reused).toBe(false);
 
     expect((await readJson("verification", "initial_verification.json"))["ran"]).toBe(false);
-    expect((await readJson("workspace", "workspace_metadata.json"))["schemaVersion"]).toBe(1);
+    expect((await readJson("workspace_metadata.json"))["schemaVersion"]).toBe(1);
   });
 
   it("installs deps then runs detected commands when verify is on (source=flag)", async () => {
@@ -105,7 +105,7 @@ describe("prepareWorkspace", () => {
     const result = await prepareWorkspace({
       pr: PR,
       config: defaultConfig,
-      paths: getArtifactPaths(cwd),
+      paths: getArtifactPaths(cwd, "test-run"),
       cwd,
       verify: true,
       token: null,
@@ -126,7 +126,7 @@ describe("prepareWorkspace", () => {
     const result = await prepareWorkspace({
       pr: PR,
       config: defaultConfig,
-      paths: getArtifactPaths(cwd),
+      paths: getArtifactPaths(cwd, "test-run"),
       cwd,
       verify: true,
       token: null,
@@ -146,7 +146,7 @@ describe("prepareWorkspace", () => {
     const result = await prepareWorkspace({
       pr: PR,
       config: defaultConfig,
-      paths: getArtifactPaths(cwd),
+      paths: getArtifactPaths(cwd, "test-run"),
       cwd,
       verify: true,
       token: null,
@@ -170,7 +170,7 @@ describe("prepareWorkspace", () => {
     const result = await prepareWorkspace({
       pr: PR,
       config,
-      paths: getArtifactPaths(cwd),
+      paths: getArtifactPaths(cwd, "test-run"),
       cwd,
       token: null,
       gitRunner: fakeGit().runner,
@@ -189,7 +189,7 @@ describe("prepareWorkspace", () => {
     const result = await prepareWorkspace({
       pr: PR,
       config: defaultConfig,
-      paths: getArtifactPaths(cwd),
+      paths: getArtifactPaths(cwd, "test-run"),
       cwd,
       verify: true,
       token: TOKEN,
@@ -206,7 +206,7 @@ describe("prepareWorkspace", () => {
     expect(log).toContain("***REDACTED***");
     // The token must never appear anywhere in the JSON artifact either.
     const rawArtifact = await readFile(
-      join(cwd, ".ai-review", "verification", "initial_verification.json"),
+      join(cwd, ".ai-review", "runs", "test-run", "verification", "initial_verification.json"),
       "utf8",
     );
     expect(rawArtifact).not.toContain(TOKEN);
@@ -217,7 +217,7 @@ describe("prepareWorkspace", () => {
     const result = await prepareWorkspace({
       pr: PR,
       config: defaultConfig,
-      paths: getArtifactPaths(cwd),
+      paths: getArtifactPaths(cwd, "test-run"),
       cwd,
       token: "secrettoken",
       gitRunner: git.runner,
@@ -227,18 +227,18 @@ describe("prepareWorkspace", () => {
     const fetchCall = git.calls.find((args) => args.includes("fetch"));
     expect(fetchCall?.some((arg) => arg.includes("secrettoken"))).toBe(true);
     expect(result.metadata.remote).toBe("https://github.com/org/repo.git");
-    const meta = await readJson("workspace", "workspace_metadata.json");
+    const meta = await readJson("workspace_metadata.json");
     expect(JSON.stringify(meta)).not.toContain("secrettoken");
   });
 
   it("always forces a clean checkout (reset --hard + clean -fd) and reuses an existing repo", async () => {
     // Simulate an existing checkout so the reuse path is taken.
-    await mkdir(join(getArtifactPaths(cwd).workspace.repo, ".git"), { recursive: true });
+    await mkdir(join(getArtifactPaths(cwd, "test-run").workspace.repo, ".git"), { recursive: true });
     const git = fakeGit();
     const result = await prepareWorkspace({
       pr: PR,
       config: defaultConfig,
-      paths: getArtifactPaths(cwd),
+      paths: getArtifactPaths(cwd, "test-run"),
       cwd,
       token: null,
       gitRunner: git.runner,

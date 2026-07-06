@@ -95,7 +95,7 @@ describe("runReviewers", () => {
   });
 
   it("runs multiple agents in parallel and merges their findings, provenance intact", async () => {
-    const paths = getArtifactPaths(dir);
+    const paths = getArtifactPaths(dir, "test-run");
     const reviewers: AgentSpec[] = [
       { name: "alpha", backend: "claude", angle: "general", enabled: true },
       { name: "beta", backend: "claude", angle: "correctness", enabled: true },
@@ -136,7 +136,7 @@ describe("runReviewers", () => {
   });
 
   it("continues when one agent hard-fails, recording it and keeping the others", async () => {
-    const paths = getArtifactPaths(dir);
+    const paths = getArtifactPaths(dir, "test-run");
     const reviewers: AgentSpec[] = [
       { name: "good", backend: "claude", angle: "general", enabled: true },
       { name: "broken", backend: "claude", angle: "general", enabled: true },
@@ -173,7 +173,7 @@ describe("runReviewers", () => {
       packet,
       packetMarkdown: "# packet",
       config: configWith(reviewers),
-      paths: getArtifactPaths(dir),
+      paths: getArtifactPaths(dir, "test-run"),
       reporter: silentReporter(),
       makeClient: (spec) => (spec.name === "garbled" ? unusableClient() : findingClient("ok")),
     });
@@ -183,7 +183,7 @@ describe("runReviewers", () => {
     expect(garbledRun.status).toBe("unusable_output");
     expect(isUsable(garbledRun.status)).toBe(false);
     expect(garbledRun.parseError).toMatch(/JSON/);
-    expect(garbledRun.rawRef).toBe("raw/garbled_review.md");
+    expect(garbledRun.rawRef).toBe("runs/test-run/raw/garbled_review.md");
     // The run still succeeds on the strength of the one usable reviewer.
     expect(result.findings).toHaveLength(1); // only "good"
   });
@@ -203,7 +203,7 @@ describe("runReviewers", () => {
       packet,
       packetMarkdown: "# packet",
       config: configWith(reviewers, { timeoutMs: 30 }),
-      paths: getArtifactPaths(dir),
+      paths: getArtifactPaths(dir, "test-run"),
       reporter: silentReporter(),
       makeClient: () => hanging, // only called for the non-mock "slow" agent
     });
@@ -226,7 +226,7 @@ describe("runReviewers", () => {
       packet,
       packetMarkdown: "# packet",
       config: configWith(reviewers),
-      paths: getArtifactPaths(dir),
+      paths: getArtifactPaths(dir, "test-run"),
       reporter: silentReporter(),
       makeClient: () => client, // only called for the non-mock "cli_slow" agent
     });
@@ -249,7 +249,7 @@ describe("runReviewers", () => {
       packet,
       packetMarkdown: "# packet",
       config: configWith(reviewers),
-      paths: getArtifactPaths(dir),
+      paths: getArtifactPaths(dir, "test-run"),
       reporter: silentReporter(),
       makeClient: () => client,
     });
@@ -257,7 +257,7 @@ describe("runReviewers", () => {
   });
 
   it("records disabled agents as skipped (visible), not silently omitted", async () => {
-    const paths = getArtifactPaths(dir);
+    const paths = getArtifactPaths(dir, "test-run");
     const reviewers: AgentSpec[] = [
       { name: "on", backend: "mock", angle: "general", enabled: true },
       { name: "off", backend: "mock", angle: "general", enabled: false },
@@ -291,7 +291,7 @@ describe("runReviewers", () => {
       packet,
       packetMarkdown: "# packet",
       config: configWith(reviewers),
-      paths: getArtifactPaths(dir),
+      paths: getArtifactPaths(dir, "test-run"),
       reporter: silentReporter(),
       detectBackend: async () => ({ available: true }),
       makeClient: () => findingClient("from codex"),
@@ -303,7 +303,7 @@ describe("runReviewers", () => {
   });
 
   it("reports codex as skipped (not omitted) when unavailable, and keeps the other reviewers", async () => {
-    const paths = getArtifactPaths(dir);
+    const paths = getArtifactPaths(dir, "test-run");
     const reviewers: AgentSpec[] = [
       { name: "claude_general_reviewer", backend: "claude", angle: "general", enabled: true },
       { name: "codex_general_reviewer", backend: "codex", angle: "general", enabled: true },
@@ -350,7 +350,7 @@ describe("runReviewers", () => {
       packet,
       packetMarkdown: "# packet",
       config: configWith(reviewers),
-      paths: getArtifactPaths(dir),
+      paths: getArtifactPaths(dir, "test-run"),
       reporter: silentReporter(),
       detectBackend: async (backend) => {
         probes.push(backend);
@@ -363,7 +363,7 @@ describe("runReviewers", () => {
   });
 
   it("throws a clear error when every configured agent is skipped (none ran)", async () => {
-    const paths = getArtifactPaths(dir);
+    const paths = getArtifactPaths(dir, "test-run");
     const reviewers: AgentSpec[] = [
       { name: "codex_general_reviewer", backend: "codex", angle: "general", enabled: true },
     ];
@@ -421,7 +421,7 @@ describe("runReviewers", () => {
   });
 
   it("throws ReviewerError when every agent fails (after writing artifacts)", async () => {
-    const paths = getArtifactPaths(dir);
+    const paths = getArtifactPaths(dir, "test-run");
     const reviewers: AgentSpec[] = [
       { name: "a", backend: "claude", angle: "general", enabled: true },
       { name: "b", backend: "claude", angle: "general", enabled: true },
@@ -454,7 +454,7 @@ describe("runReviewers", () => {
         packet,
         packetMarkdown: "# packet",
         config: configWith([{ name: "off", backend: "mock", angle: "general", enabled: false }]),
-        paths: getArtifactPaths(dir),
+        paths: getArtifactPaths(dir, "test-run"),
         reporter: silentReporter(),
       }),
     ).rejects.toThrow(/No reviewer agents are enabled/);
@@ -479,7 +479,7 @@ describe("runReviewers usable-output policy", () => {
       packet,
       packetMarkdown: "# packet",
       config: configWith(reviewers, overrides),
-      paths: getArtifactPaths(dir),
+      paths: getArtifactPaths(dir, "test-run"),
       reporter: silentReporter(),
       makeClient,
     });
@@ -496,7 +496,7 @@ describe("runReviewers usable-output policy", () => {
   });
 
   it("fails (non-zero) when every reviewer returns unusable output", async () => {
-    const paths = getArtifactPaths(dir);
+    const paths = getArtifactPaths(dir, "test-run");
     const reviewers: AgentSpec[] = [
       { name: "u1", backend: "claude", angle: "general", enabled: true },
       { name: "u2", backend: "claude", angle: "general", enabled: true },

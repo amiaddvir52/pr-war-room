@@ -9,22 +9,35 @@ import type { FindingCluster } from "../../findings/schema.js";
  * verification summary the same way. Kept here so the two prompts can't drift.
  */
 
+/**
+ * Max evidence items rendered into a per-cluster prompt. Merged evidence is
+ * ordered strongest-first (see mergeCluster), so the cap keeps the most
+ * representative items; the full list always remains in the JSON artifacts.
+ * Without a cap, a large merged cluster (the demo's worst held 84 items) blows
+ * the prompt up and slows the skeptic/judge toward their timeouts for no
+ * added signal — the items are near-duplicates of each other by construction.
+ */
+export const MAX_PROMPT_EVIDENCE = 12;
+
 /** Render the cluster under review: its metadata, claim, evidence, and fix. */
 export function renderCluster(cluster: FindingCluster): string {
   const lines =
     cluster.line_start === 0 && cluster.line_end === 0
       ? "file-level (no line range)"
       : `lines ${cluster.line_start}-${cluster.line_end}`;
-  const evidence = cluster.evidence.map((e) => `  - ${e}`).join("\n");
+  const shown = cluster.evidence.slice(0, MAX_PROMPT_EVIDENCE);
+  const omitted = cluster.evidence.length - shown.length;
+  const evidence = shown.map((e) => `  - ${e}`).join("\n");
   return [
     `Title: ${cluster.merged_title}`,
     `Category: ${cluster.category}`,
     `Severity: ${cluster.severity}`,
     `File: ${cluster.file ?? "(none)"} (${lines})`,
-    `Reported by ${cluster.agreement} independent reviewer(s): ${cluster.source_agents.join(", ")}`,
+    `Reported by ${cluster.agreement} independent reviewer(s) in ${cluster.source_finding_ids.length} finding(s): ${cluster.source_agents.join(", ")}`,
     `Claim: ${cluster.claim}`,
     "Evidence the reviewers cited:",
     evidence,
+    ...(omitted > 0 ? [`  (…and ${omitted} more similar evidence items, omitted here for brevity.)`] : []),
     `Suggested fix: ${cluster.suggested_fix ?? "(none)"}`,
   ].join("\n");
 }

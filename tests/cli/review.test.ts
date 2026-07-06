@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, writeFile, readFile, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runReview } from "../../src/cli/commands/review.js";
@@ -15,9 +15,21 @@ import { Reporter, silentReporter } from "../../src/ui/reporter.js";
 import type { IngestPullRequest, IngestResult } from "../../src/github/types.js";
 import type { PrepareWorkspaceInput, WorkspaceResult } from "../../src/workspace/types.js";
 import type { BuildReviewPacketInput, ReviewPacket } from "../../src/context/types.js";
+import { readLatestRunPointer } from "../../src/storage/latestRun.js";
+
+/**
+ * Resolve the latest run's artifact directory the way real consumers do — via
+ * the `.ai-review/latest.json` pointer — so these tests exercise the pointer
+ * plumbing too.
+ */
+async function latestRunDir(dir: string): Promise<string> {
+  const pointer = await readLatestRunPointer(dir);
+  if (pointer === null) throw new Error("no .ai-review/latest.json pointer was written");
+  return join(dir, ".ai-review", "runs", pointer.runId);
+}
 
 async function readJson(dir: string, ...segments: string[]): Promise<Record<string, unknown>> {
-  const raw = await readFile(join(dir, ".ai-review", ...segments), "utf8");
+  const raw = await readFile(join(await latestRunDir(dir), ...segments), "utf8");
   return JSON.parse(raw) as Record<string, unknown>;
 }
 
@@ -220,13 +232,13 @@ describe("runReview (integration)", () => {
     await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir }));
     expect((await readJson(dir, "github", "pr_metadata.json"))["number"]).toBe(123);
     expect((await readJson(dir, "github", "changed_files.json"))["totalCount"]).toBe(1);
-    const diff = await readFile(join(dir, ".ai-review", "github", "diff.patch"), "utf8");
+    const diff = await readFile(join(await latestRunDir(dir), "github", "diff.patch"), "utf8");
     expect(diff).toBe("DIFF TEXT");
   });
 
   it("does not write diff.patch when the diff is null", async () => {
     await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, ingest: fakeIngest({ diff: null }) }));
-    await expect(stat(join(dir, ".ai-review", "github", "diff.patch"))).rejects.toThrow();
+    await expect(stat(join(await latestRunDir(dir), "github", "diff.patch"))).rejects.toThrow();
   });
 
   it("invokes workspace prep once, without verify by default", async () => {
@@ -318,7 +330,7 @@ describe("runReview (integration)", () => {
     await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, runReviewers: dupes }));
 
     const clusters = JSON.parse(
-      await readFile(join(dir, ".ai-review", "deduped", "finding_clusters.json"), "utf8"),
+      await readFile(join(await latestRunDir(dir), "deduped", "finding_clusters.json"), "utf8"),
     ) as Array<{ cluster_id: string; source_finding_ids: string[]; agreement: number; severity: string }>;
     expect(clusters).toHaveLength(1);
     expect(clusters[0]?.cluster_id).toBe("cluster-001");
@@ -374,7 +386,7 @@ describe("runReview (integration)", () => {
     expect(sk.calls[0]?.clusters).toHaveLength(1);
     expect(sk.calls[0]?.clusters[0]?.cluster_id).toBe("cluster-001");
     const written = JSON.parse(
-      await readFile(join(dir, ".ai-review", "skeptic", "skeptic_results.json"), "utf8"),
+      await readFile(join(await latestRunDir(dir), "skeptic", "skeptic_results.json"), "utf8"),
     ) as SkepticResult[];
     expect(written).toHaveLength(1);
     expect(written[0]?.decision.action).toBe("drop");
@@ -385,7 +397,7 @@ describe("runReview (integration)", () => {
     const sk = capturingSkeptic();
     await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, skeptic: sk.fn }));
     expect(sk.calls).toHaveLength(0);
-    await expect(stat(join(dir, ".ai-review", "skeptic", "skeptic_results.json"))).rejects.toThrow();
+    await expect(stat(join(await latestRunDir(dir), "skeptic", "skeptic_results.json"))).rejects.toThrow();
   });
 
   it("ranks the supported clusters and writes ranked_findings.json + final_findings.json (Phase 9)", async () => {
@@ -438,7 +450,7 @@ describe("runReview (integration)", () => {
     expect(jg.calls[0]?.clusters.map((c) => c.cluster_id)).toEqual(["cluster-001"]);
 
     const ranked = JSON.parse(
-      await readFile(join(dir, ".ai-review", "judge", "ranked_findings.json"), "utf8"),
+      await readFile(join(await latestRunDir(dir), "judge", "ranked_findings.json"), "utf8"),
     ) as JudgeResult[];
     expect(ranked).toHaveLength(1);
     expect(ranked[0]?.decision.classification).toBe("blocker");
@@ -446,7 +458,7 @@ describe("runReview (integration)", () => {
     // final_findings.json is the report-ready join: the cluster enriched with the
     // judge's classification/score (drops would be excluded — none here).
     const final = JSON.parse(
-      await readFile(join(dir, ".ai-review", "final_findings.json"), "utf8"),
+      await readFile(join(await latestRunDir(dir), "final_findings.json"), "utf8"),
     ) as Array<{ cluster_id: string; final_classification: string; final_score: number; claim: string }>;
     expect(final).toHaveLength(1);
     expect(final[0]?.cluster_id).toBe("cluster-001");
@@ -455,7 +467,7 @@ describe("runReview (integration)", () => {
     expect(final[0]?.claim).toBe("possible crash");
 
     // Phase 10 — the report renders the blocker under Must Fix.
-    const report = await readFile(join(dir, ".ai-review", "report.md"), "utf8");
+    const report = await readFile(join(await latestRunDir(dir), "report.md"), "utf8");
     expect(report).toContain("# AI Pre-Review Report");
     expect(report).toContain("## Must Fix Before Human Review");
     expect(report).toContain("### possible crash");
@@ -467,11 +479,11 @@ describe("runReview (integration)", () => {
     const jg = capturingJudge();
     await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, judge: jg.fn }));
     expect(jg.calls).toHaveLength(0);
-    await expect(stat(join(dir, ".ai-review", "judge", "ranked_findings.json"))).rejects.toThrow();
-    await expect(stat(join(dir, ".ai-review", "final_findings.json"))).rejects.toThrow();
+    await expect(stat(join(await latestRunDir(dir), "judge", "ranked_findings.json"))).rejects.toThrow();
+    await expect(stat(join(await latestRunDir(dir), "final_findings.json"))).rejects.toThrow();
 
     // Phase 10 — the report is still written and degrades (no final_findings link).
-    const report = await readFile(join(dir, ".ai-review", "report.md"), "utf8");
+    const report = await readFile(join(await latestRunDir(dir), "report.md"), "utf8");
     expect(report).toContain("# AI Pre-Review Report");
     expect(report).not.toContain("(final_findings.json)");
     expect(report).not.toContain("(judge/ranked_findings.json)");
@@ -479,7 +491,7 @@ describe("runReview (integration)", () => {
 
   it("writes report.md with the core sections and a ready verdict when empty (Phase 10)", async () => {
     await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir }));
-    const report = await readFile(join(dir, ".ai-review", "report.md"), "utf8");
+    const report = await readFile(join(await latestRunDir(dir), "report.md"), "utf8");
     expect(report).toContain("# AI Pre-Review Report");
     expect(report).toContain("## Summary");
     expect(report).toContain("## Verification Results");
@@ -492,7 +504,7 @@ describe("runReview (integration)", () => {
   it("writes a report.md that degrades when the skeptic is disabled (Phase 10)", async () => {
     await writeFile(join(dir, CONFIG_FILENAME), JSON.stringify({ skeptic: { enabled: false } }), "utf8");
     await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir }));
-    const report = await readFile(join(dir, ".ai-review", "report.md"), "utf8");
+    const report = await readFile(join(await latestRunDir(dir), "report.md"), "utf8");
     expect(report).toContain("# AI Pre-Review Report");
     expect(report).not.toContain("after skeptic");
     expect(report).not.toContain("(skeptic/skeptic_results.json)");
@@ -550,14 +562,14 @@ describe("runReview (integration)", () => {
     // an edge-case finding anchored at line 1, and a line-less "missing test
     // coverage" finding (line 0/0).
     const findings = JSON.parse(
-      await readFile(join(dir, ".ai-review", "normalized", "all_findings.json"), "utf8"),
+      await readFile(join(await latestRunDir(dir), "normalized", "all_findings.json"), "utf8"),
     ) as Array<{ id: string; source_agent: string }>;
     expect(findings).toHaveLength(2);
     expect(findings[0]?.source_agent).toBe("mock");
     expect(findings[0]?.id).toMatch(/^mock-\d{3}$/);
 
     const clusters = JSON.parse(
-      await readFile(join(dir, ".ai-review", "deduped", "finding_clusters.json"), "utf8"),
+      await readFile(join(await latestRunDir(dir), "deduped", "finding_clusters.json"), "utf8"),
     ) as Array<{ cluster_id: string }>;
 
     // Phase 8 — the real skeptic ran with the mock backend (deterministic,
@@ -565,7 +577,7 @@ describe("runReview (integration)", () => {
     // and finding #2 is line-less, so neither is dropped: one result per cluster,
     // all kept deterministically.
     const skeptic = JSON.parse(
-      await readFile(join(dir, ".ai-review", "skeptic", "skeptic_results.json"), "utf8"),
+      await readFile(join(await latestRunDir(dir), "skeptic", "skeptic_results.json"), "utf8"),
     ) as SkepticResult[];
     expect(skeptic).toHaveLength(clusters.length);
     expect(skeptic.every((r) => r.source === "deterministic")).toBe(true);
@@ -575,13 +587,13 @@ describe("runReview (integration)", () => {
     // supported cluster is ranked; the mock finding severities (medium/low) never
     // classify as "drop", so all appear in final_findings.json.
     const ranked = JSON.parse(
-      await readFile(join(dir, ".ai-review", "judge", "ranked_findings.json"), "utf8"),
+      await readFile(join(await latestRunDir(dir), "judge", "ranked_findings.json"), "utf8"),
     ) as JudgeResult[];
     expect(ranked).toHaveLength(clusters.length);
     expect(ranked.every((r) => r.source === "deterministic")).toBe(true);
 
     const final = JSON.parse(
-      await readFile(join(dir, ".ai-review", "final_findings.json"), "utf8"),
+      await readFile(join(await latestRunDir(dir), "final_findings.json"), "utf8"),
     ) as Array<{ cluster_id: string; final_classification: string; final_score: number }>;
     expect(final).toHaveLength(clusters.length);
     expect(final.every((f) => f.final_classification !== "drop")).toBe(true);
@@ -603,5 +615,146 @@ describe("runReview (integration)", () => {
   it("rejects an invalid URL and writes no artifact", async () => {
     await expect(runReview("not-a-url", fakes({ cwd: dir }))).rejects.toThrow(PrUrlError);
     await expect(stat(join(dir, ".ai-review"))).rejects.toThrow();
+  });
+
+  /* -------------------- run-scoped artifacts (stale-mixing) ---------------- */
+
+  it("gives each run its own artifact directory — a second run never mixes with the first", async () => {
+    const oneFinding = (agent: string): RunReviewers => async () => ({
+      findings: [
+        {
+          id: `${agent}-001`,
+          source_agent: agent,
+          raw_agent_output_ref: `raw/${agent}.md`,
+          title: "possible crash",
+          category: "correctness",
+          severity: "high",
+          confidence: 0.7,
+          file: "src/x.ts",
+          line_start: 10,
+          line_end: 12,
+          claim: "possible crash",
+          evidence: ["line 10"],
+          suggested_fix: null,
+          suggested_test: null,
+          human_review_likelihood: 0.8,
+          needs_code_change: true,
+        },
+      ],
+      agents: [],
+    });
+
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, runReviewers: oneFinding("first_agent") }));
+    const firstDir = await latestRunDir(dir);
+    // Simulate the demo's stale-artifact hazard: an old per-agent file in run 1.
+    await mkdir(join(firstDir, "raw"), { recursive: true });
+    await writeFile(join(firstDir, "raw", "stale_agent_findings.json"), "[]", "utf8");
+
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, runReviewers: oneFinding("second_agent") }));
+    const secondDir = await latestRunDir(dir);
+
+    expect(secondDir).not.toBe(firstDir);
+    // The pointer moved to the new run, whose tree contains nothing from run 1.
+    await expect(stat(join(secondDir, "raw", "stale_agent_findings.json"))).rejects.toThrow();
+    const clusters = JSON.parse(
+      await readFile(join(secondDir, "deduped", "finding_clusters.json"), "utf8"),
+    ) as Array<{ source_agents: string[] }>;
+    expect(clusters.flatMap((c) => c.source_agents)).toEqual(["second_agent"]);
+    // Run 1's artifacts survive untouched in their own directory (auditable),
+    // they are simply no longer what `latest.json` names.
+    await expect(stat(join(firstDir, "raw", "stale_agent_findings.json"))).resolves.toBeDefined();
+  });
+
+  /* ------------------------------ HTML report ------------------------------ */
+
+  it("writes report.html as the primary report: sections, filters, offline, escaped (Phase 10)", async () => {
+    const lines: string[] = [];
+    const reporter = new Reporter({ color: false, out: (line) => lines.push(line), err: () => {} });
+    await runReview("https://github.com/org/repo/pull/123", fakes({ cwd: dir, reporter }));
+
+    const html = await readFile(join(await latestRunDir(dir), "report.html"), "utf8");
+    // Core structure.
+    expect(html).toContain("<!doctype html>");
+    expect(html).toContain("PR&nbsp;WAR&nbsp;ROOM");
+    expect(html).toContain("Must fix before human review");
+    expect(html).toContain("Should fix before human review");
+    expect(html).toContain("Verification");
+    expect(html).toContain("Dropped findings");
+    expect(html).toContain("Raw artifacts");
+    // Filter/search UI.
+    expect(html).toContain('id="f-search"');
+    expect(html).toContain('id="f-severity"');
+    expect(html).toContain('id="f-category"');
+    expect(html).toContain('id="f-file"');
+    expect(html).toContain('id="f-support"');
+    // Self-contained: no external scripts/styles/fonts. The only http(s)
+    // reference allowed is the PR's own GitHub link.
+    expect(html).not.toMatch(/<script[^>]+src=/i);
+    expect(html).not.toMatch(/<link[^>]+href=/i);
+    expect(html).not.toMatch(/@import/i);
+    expect(html).not.toMatch(/url\(\s*['"]?https?:/i);
+    const externalRefs = [...html.matchAll(/https?:\/\/[^"'\s<)]+/g)].map((m) => m[0]);
+    expect(externalRefs.every((u) => u.startsWith("https://github.com/org/repo"))).toBe(true);
+
+    // The CLI names the HTML report as the primary output.
+    expect(lines.some((l) => l.includes("Report written to") && l.includes("report.html"))).toBe(true);
+  });
+
+  it("escapes hostile finding content in report.html (no HTML/script injection)", async () => {
+    const hostile: RunReviewers = async () => ({
+      findings: [
+        {
+          id: "evil-001",
+          source_agent: "evil_agent",
+          raw_agent_output_ref: "raw/evil.md",
+          title: `<script>alert("xss")</script> <img src=x onerror=alert(1)>`,
+          category: "security",
+          severity: "blocker",
+          confidence: 0.9,
+          file: `src/<script>bad</script>.ts`,
+          line_start: 1,
+          line_end: 2,
+          claim: "backticks ``` and \"quotes\" and <iframe src='javascript:alert(2)'>",
+          evidence: [`<script>steal()</script>`, "onmouseover=\"alert(3)\""],
+          suggested_fix: `</details><script>alert(4)</script>`,
+          suggested_test: null,
+          human_review_likelihood: 0.9,
+          needs_code_change: true,
+        },
+      ],
+      agents: [],
+    });
+    // Judge includes the finding so it renders as a card (worst case for injection).
+    const includeAll: JudgeResult = {
+      cluster_id: "cluster-001",
+      source: "llm",
+      model_verdict: { final_classification: "blocker", model_score: 0.9, reasoning_summary: "hostile" },
+      decision: {
+        classification: "blocker",
+        score: 0.9,
+        include_in_main_report: true,
+        reason: "hostile",
+        softened_from_model_classification: null,
+      },
+      failure: null,
+    };
+    await runReview(
+      "https://github.com/org/repo/pull/123",
+      fakes({ cwd: dir, runReviewers: hostile, judge: capturingJudge([includeAll]).fn }),
+    );
+
+    const html = await readFile(join(await latestRunDir(dir), "report.html"), "utf8");
+    // No executable remnants of the payloads…
+    expect(html).not.toContain("<script>alert");
+    expect(html).not.toContain("<script>steal");
+    expect(html).not.toContain("<img src=x");
+    expect(html).not.toContain("<iframe");
+    // The literal text "javascript:alert" may appear ESCAPED inside content;
+    // what must never appear is a real attribute carrying it.
+    expect(html).not.toMatch(/(href|src)\s*=\s*["']?javascript:/i);
+    // …but the content is present, escaped.
+    expect(html).toContain("&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;");
+    // Exactly one <script> tag total: the report's own static filter script.
+    expect([...html.matchAll(/<script/gi)]).toHaveLength(1);
   });
 });

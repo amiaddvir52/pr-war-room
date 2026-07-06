@@ -16,6 +16,7 @@ import type {
 import type { Reporter } from "../ui/reporter.js";
 import { mapWithConcurrency } from "../util/mapWithConcurrency.js";
 import { TIMEOUT_GRACE_MS, withTimeout } from "../util/withTimeout.js";
+import { adaptiveClusterTimeoutMs } from "./clusterTimeout.js";
 import { createJudge, type Judge } from "./JudgeAgent.js";
 
 /**
@@ -46,8 +47,12 @@ export interface RunJudgeInput {
   packet: ReviewPacket;
   config: Config;
   reporter: Reporter;
-  /** Injected in tests to avoid the network; only called for non-`mock` backends. */
-  makeJudge?: (config: Config) => Judge;
+  /**
+   * Injected in tests to avoid the network; only called for non-`mock`
+   * backends. `timeoutMs` is the adaptive per-cluster budget (see
+   * clusterTimeout.ts) the returned judge's own model call should honour.
+   */
+  makeJudge?: (config: Config, timeoutMs?: number) => Judge;
 }
 
 export interface RunJudgeResult {
@@ -151,14 +156,17 @@ export const runJudge: RunJudge = async (input) => {
   // purely from the deterministic rules instead of asking for a mock client.
   const useLlm = config.judge.backend !== "mock";
 
-  // Build the judge once, up front. A construction failure must NOT abort the
-  // review (recall-first): record it and let every finding fall through to a
-  // keep-on-failure fallback below.
-  let judge: Judge | null = null;
+  // Probe judge construction once, up front, so a misconfigured backend warns a
+  // single time. A construction failure must NOT abort the review
+  // (recall-first): record it and let every finding fall through to a
+  // keep-on-failure fallback below. Per-cluster construction below is cheap
+  // (closures over config — no subprocess, no network) and deterministic, so if
+  // the probe succeeds the per-cluster constructions succeed too.
+  const makeJudge = input.makeJudge ?? createJudge;
   let constructionFailure: JudgeFailure | null = null;
   if (useLlm) {
     try {
-      judge = (input.makeJudge ?? createJudge)(config);
+      makeJudge(config, config.judge.timeoutMs);
     } catch (err) {
       constructionFailure = {
         kind: "construction_error",
@@ -169,6 +177,7 @@ export const runJudge: RunJudge = async (input) => {
       );
     }
   }
+  const canRunLlm = useLlm && constructionFailure === null;
 
   const spinner = reporter.spinner(
     `ranking ${clusters.length} finding${clusters.length === 1 ? "" : "s"} with the judge`,
@@ -179,11 +188,15 @@ export const runJudge: RunJudge = async (input) => {
       const skeptic = skepticById.get(cluster.cluster_id) ?? null;
       // No LLM (mock backend), or the judge failed to construct: reconcile from
       // the deterministic rules and any construction failure — never a network call.
-      if (judge === null) return reconcileJudge(cluster, skeptic, null, constructionFailure);
+      if (!canRunLlm) return reconcileJudge(cluster, skeptic, null, constructionFailure);
+      // Adaptive budget: a big merged cluster carries a proportionally bigger
+      // prompt, so it gets a bigger slice than a singleton (clusterTimeout.ts).
+      const timeoutMs = adaptiveClusterTimeoutMs(config.judge.timeoutMs, cluster);
       try {
+        const judge = makeJudge(config, timeoutMs);
         const verdict = await withTimeout(
           judge(cluster, skeptic, packet),
-          config.judge.timeoutMs + TIMEOUT_GRACE_MS,
+          timeoutMs + TIMEOUT_GRACE_MS,
         );
         return reconcileJudge(cluster, skeptic, verdict, null);
       } catch (err) {
@@ -197,6 +210,19 @@ export const runJudge: RunJudge = async (input) => {
     });
   } finally {
     spinner.stop();
+  }
+
+  // Surface every keep-on-failure fallback loudly (mirrors runSkeptic): a
+  // finding ranked by fallback was never actually judged, and the user should
+  // know that without reading ranked_findings.json.
+  const titleById = new Map(clusters.map((c) => [c.cluster_id, c.merged_title]));
+  for (const r of ranked) {
+    if (r.failure !== null) {
+      reporter.warn(
+        `judge ${r.failure.kind === "timeout" ? "timed out" : `failed (${r.failure.kind})`} on ` +
+          `"${titleById.get(r.cluster_id) ?? r.cluster_id}" — classified deterministically (recall-first fallback)`,
+      );
+    }
   }
   return { ranked };
 };

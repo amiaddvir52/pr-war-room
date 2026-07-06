@@ -1,8 +1,8 @@
-import { rm } from "node:fs/promises";
 import { relative } from "node:path";
 import { parsePrUrl } from "../../github/parsePrUrl.js";
 import { loadConfig } from "../../config/loadConfig.js";
 import { getArtifactPaths } from "../../storage/artifactPaths.js";
+import { newRunId, writeLatestRunPointer } from "../../storage/latestRun.js";
 import { writeJsonArtifact, writeTextArtifact } from "../../storage/writeArtifact.js";
 import { buildRunMetadata } from "../../runMetadata.js";
 import { Reporter } from "../../ui/reporter.js";
@@ -18,6 +18,7 @@ import type {
 import { runReviewers, isUsable, didRun } from "../../agents/runReviewers.js";
 import type { RunReviewers } from "../../agents/runReviewers.js";
 import { deduplicateFindings } from "../../findings/deduplicateFindings.js";
+import type { Adjudicator } from "../../findings/deduplicateFindings.js";
 import { createDedupAdjudicator } from "../../agents/DedupAdjudicator.js";
 import { runSkeptic, selectSupportedClusters } from "../../agents/runSkeptic.js";
 import type { RunSkeptic } from "../../agents/runSkeptic.js";
@@ -25,6 +26,7 @@ import { runJudge } from "../../agents/runJudge.js";
 import type { RunJudge } from "../../agents/runJudge.js";
 import { selectFinalFindings } from "../../findings/scoreFindings.js";
 import { renderMarkdownReport } from "../../report/generateMarkdownReport.js";
+import { renderHtmlReport } from "../../report/generateHtmlReport.js";
 import type {
   FinalFinding,
   FindingCluster,
@@ -82,7 +84,12 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
 
   const pr = parsePrUrl(prUrl);
   const { config, source, path } = await loadConfig(cwd);
-  const paths = getArtifactPaths(cwd);
+  // Every review run gets its own artifact directory (`.ai-review/runs/<id>/`)
+  // so a new run can never mix its outputs with a previous run's — the
+  // stale-artifact failure the first demo exposed. `latest.json` points
+  // consumers (fix mode, the user) at this run.
+  const runId = newRunId();
+  const paths = getArtifactPaths(cwd, runId);
 
   // Render an artifact path as a Cmd-clickable link. The short label is relative
   // to cwd (e.g. `.ai-review/normalized/all_findings.json`); the link target is
@@ -103,11 +110,11 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
     cwd,
   });
   await writeJsonArtifact(paths.runMetadata, metadata);
-  // A previous run's final_findings.json must not survive into this run: if
-  // this review aborts before rewriting it, `fix` would otherwise pass its
-  // PR-provenance check (run_metadata.json now names THIS PR) while consuming
-  // the OLD run's findings.
-  await rm(paths.finalFindings, { force: true });
+  // Point `latest.json` at this run as soon as its directory exists. If the
+  // run aborts midway, the pointer names an incomplete run — consumers fail
+  // explicitly on the missing artifact (e.g. fix's "no final findings") rather
+  // than silently reading a stale mix of runs.
+  await writeLatestRunPointer({ baseDir: cwd, runId, command: "review", pr, prUrl });
 
   const summary: ReadonlyArray<readonly [string, string]> = [
     ["PR", `${pr.owner}/${pr.repo}#${pr.number}`],
@@ -115,7 +122,8 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
     ...(config.agents.preset !== undefined
       ? [["Preset", config.agents.preset] as const]
       : []),
-    ["Artifacts", relative(cwd, paths.root)],
+    ["Run", runId],
+    ["Artifacts", relative(cwd, paths.runDir)],
   ];
 
   const art = selectBanner();
@@ -224,10 +232,38 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
   // reviewers are merged into one cluster per underlying issue (singletons
   // included), so the later skeptic/judge phases work on a single uniform unit.
   // Deterministic heuristics by default; the optional LLM adjudicator (§10.6
-  // step 4) is only built when configured on.
-  const adjudicate = config.dedup.llm.enabled ? createDedupAdjudicator(config) : undefined;
-  const clusters = await deduplicateFindings(reviewResult.findings, config.dedup, adjudicate);
+  // step 4) is only built when configured on — and if it cannot be constructed
+  // (backend unavailable), dedup falls back to deterministic-only rather than
+  // failing the run (local-first).
+  let adjudicate: Adjudicator | undefined;
+  let llmDedupSkipReason: string | null = "disabled (dedup.llm.enabled = false)";
+  if (config.dedup.llm.enabled) {
+    try {
+      adjudicate = createDedupAdjudicator(config);
+      llmDedupSkipReason = null;
+    } catch (err) {
+      llmDedupSkipReason = `unavailable (${err instanceof Error ? err.message : String(err)})`;
+      reporter.warn(
+        `LLM dedup adjudicator could not be constructed — falling back to deterministic dedup only. ${llmDedupSkipReason}`,
+      );
+    }
+  }
+  const { clusters, stats: dedupStats } = await deduplicateFindings(
+    reviewResult.findings,
+    config.dedup,
+    adjudicate,
+  );
   await writeJsonArtifact(paths.deduped.clusters, clusters);
+  await writeJsonArtifact(paths.deduped.stats, {
+    ...dedupStats,
+    llmSkipReason: llmDedupSkipReason,
+    thresholds: {
+      proximityLines: config.dedup.proximityLines,
+      mergeThreshold: config.dedup.mergeThreshold,
+      candidateThreshold: config.dedup.candidateThreshold,
+      minLinkScore: config.dedup.minLinkScore,
+    },
+  });
 
   const merged = reviewResult.findings.length - clusters.length;
   reporter.blank();
@@ -236,6 +272,18 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
       (merged > 0 ? ` (${merged} merged as duplicate${merged === 1 ? "" : "s"})` : "") +
       ` — see ${artifactLink(paths.deduped.clusters)}`,
   );
+  // Say explicitly whether LLM dedup ran or was skipped — never leave the user
+  // guessing why a gray-zone pair did (or didn't) merge.
+  if (llmDedupSkipReason !== null) {
+    reporter.note(
+      `LLM dedup skipped — ${llmDedupSkipReason}; ${dedupStats.grayPairs} gray-zone pair${dedupStats.grayPairs === 1 ? "" : "s"} left unmerged (deterministic heuristics only).`,
+    );
+  } else {
+    reporter.note(
+      `LLM dedup ran on ${dedupStats.grayPairsAdjudicated} gray-zone pair${dedupStats.grayPairsAdjudicated === 1 ? "" : "s"} ` +
+        `(${dedupStats.llmMerges} merged${dedupStats.adjudicatorErrors > 0 ? `, ${dedupStats.adjudicatorErrors} adjudicator errors treated as "don't merge"` : ""}).`,
+    );
+  }
 
   // Phase 8 — skeptic / evidence validation. Each cluster is challenged with
   // deterministic file/line/diff checks and (unless disabled) an LLM skeptic that
@@ -298,10 +346,13 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
     reporter.note("Judge disabled (judge.enabled = false) — no ranking or final_findings.json produced.");
   }
 
-  // Phase 10 — render the concise, human-facing report from the in-memory
-  // pipeline outputs (no disk round-trip). Degrades gracefully when the judge
-  // and/or skeptic are disabled (ranked/final null, skepticResults empty).
-  const reportMarkdown = renderMarkdownReport({
+  // Phase 10 — render the human-facing reports from the in-memory pipeline
+  // outputs (no disk round-trip). Both renderers degrade gracefully when the
+  // judge and/or skeptic are disabled (ranked/final null, skepticResults
+  // empty). The HTML report is the PRIMARY user-facing artifact (structured,
+  // filterable, self-contained); the Markdown report is kept as a secondary /
+  // legacy rendering.
+  const reportInput = {
     packet,
     clusters,
     candidates,
@@ -309,7 +360,7 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
     ranked,
     final,
     rawFindingCount: reviewResult.findings.length,
-    meta: { toolVersion: options.version, generatedAt: metadata.timestamp },
+    meta: { toolVersion: options.version, generatedAt: metadata.timestamp, runId },
     options: {
       maxFindings: config.review.maxFindings,
       includeNiceToHave: config.review.includeNiceToHave,
@@ -317,8 +368,10 @@ export async function runReview(prUrl: string, options: ReviewOptions): Promise<
       skepticEnabled: config.skeptic.enabled,
     },
     paths,
-  });
-  await writeTextArtifact(paths.reportMd, reportMarkdown);
+  };
+  await writeTextArtifact(paths.reportHtml, renderHtmlReport(reportInput));
+  await writeTextArtifact(paths.reportMd, renderMarkdownReport(reportInput));
   reporter.blank();
-  reporter.success(`report written — see ${artifactLink(paths.reportMd)}`);
+  reporter.success(`Report written to ${artifactLink(paths.reportHtml)}`);
+  reporter.note(`Markdown version: ${artifactLink(paths.reportMd)}`);
 }

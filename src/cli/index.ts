@@ -48,7 +48,7 @@ export function buildProgram(version: string): Command {
     .command("fix")
     .argument("<pr-url>", "GitHub pull request URL")
     .description(
-      "Generate a local fix patch (.ai-review/patch.diff) for the latest review's findings",
+      "Generate a local fix patch (.ai-review/runs/<run_id>/patch.diff) for the latest review's findings",
     )
     .option(
       "--apply",

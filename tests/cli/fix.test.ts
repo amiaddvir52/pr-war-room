@@ -15,6 +15,10 @@ import { makeFinalFinding } from "../fixtures/finalFinding.js";
 
 const PR_URL = "https://github.com/org/repo/pull/123";
 
+/** The seeded review run's id; fix must resolve it via `.ai-review/latest.json`. */
+const RUN_ID = "run-fix-test";
+const RUN_REL = `.ai-review/runs/${RUN_ID}`;
+
 let dir: string;
 
 beforeEach(async () => {
@@ -36,31 +40,45 @@ async function seedFile(relPath: string, content: unknown): Promise<void> {
 }
 
 async function readJson(...segments: string[]): Promise<Record<string, unknown>> {
-  const raw = await readFile(join(dir, ".ai-review", ...segments), "utf8");
+  const raw = await readFile(join(dir, RUN_REL, ...segments), "utf8");
   return JSON.parse(raw) as Record<string, unknown>;
 }
 
 async function exists(...segments: string[]): Promise<boolean> {
   try {
-    await stat(join(dir, ".ai-review", ...segments));
+    await stat(join(dir, RUN_REL, ...segments));
     return true;
   } catch {
     return false;
   }
 }
 
+/** Point `.ai-review/latest.json` at the seeded run, as a real review would. */
+async function seedLatestPointer(): Promise<void> {
+  await seedFile(".ai-review/latest.json", {
+    schemaVersion: 1,
+    runId: RUN_ID,
+    runDir: `runs/${RUN_ID}`,
+    command: "review",
+    pr: { owner: "org", repo: "repo", number: 123 },
+    prUrl: PR_URL,
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+}
+
 /** Seed a complete prior review run (the fix command's required inputs). */
 async function seedReviewRun(
   options: { findings?: unknown[]; pr?: { owner: string; repo: string; number: number } } = {},
 ): Promise<void> {
+  await seedLatestPointer();
   const findings = options.findings ?? [makeFinalFinding()];
-  await seedFile(".ai-review/final_findings.json", findings);
-  await seedFile(".ai-review/run_metadata.json", {
+  await seedFile(`${RUN_REL}/final_findings.json`, findings);
+  await seedFile(`${RUN_REL}/run_metadata.json`, {
     command: "review",
     pr: options.pr ?? { owner: "org", repo: "repo", number: 123 },
     marker: "written-by-review",
   });
-  await seedFile(".ai-review/github/changed_files.json", {
+  await seedFile(`${RUN_REL}/github/changed_files.json`, {
     schemaVersion: 1,
     totalCount: 1,
     truncated: false,
@@ -76,7 +94,7 @@ async function seedReviewRun(
       },
     ],
   });
-  await seedFile(".ai-review/workspace/workspace_metadata.json", { headSha: "reviewedsha" });
+  await seedFile(`${RUN_REL}/workspace_metadata.json`, { headSha: "reviewedsha" });
 }
 
 function fakeEnsureWorkspace(
@@ -150,13 +168,21 @@ function baseOptions(overrides: Partial<FixOptions> = {}): FixOptions {
 }
 
 describe("runFix", () => {
-  it("fails with FixError (exit 7) and review guidance when final_findings.json is missing", async () => {
+  it("fails with FixError (exit 7) and review guidance when no review run exists at all", async () => {
     const promise = runFix(PR_URL, baseOptions());
     await expect(promise).rejects.toBeInstanceOf(FixError);
     await expect(runFix(PR_URL, baseOptions())).rejects.toMatchObject({ exitCode: 7 });
     await expect(runFix(PR_URL, baseOptions())).rejects.toThrow(/pr-war-room review/);
     expect(await exists("fix_report.md")).toBe(false);
     expect(await exists("fix_results.json")).toBe(false);
+  });
+
+  it("fails with FixError (exit 7) when the latest run has no final_findings.json", async () => {
+    // The pointer names a run, but the run is incomplete (aborted mid-review).
+    await seedLatestPointer();
+    await expect(runFix(PR_URL, baseOptions())).rejects.toBeInstanceOf(FixError);
+    await expect(runFix(PR_URL, baseOptions())).rejects.toThrow(/final findings/i);
+    expect(await exists("fix_report.md")).toBe(false);
   });
 
   it("fails with FixError when the findings belong to a different PR", async () => {
@@ -184,7 +210,7 @@ describe("runFix", () => {
     expect(fixes.calls).toHaveLength(0);
     const results = await readJson("fix_results.json");
     expect(results).toMatchObject({ fixableCount: 0, selectedCount: 0, patchWritten: false });
-    const report = await readFile(join(dir, ".ai-review", "fix_report.md"), "utf8");
+    const report = await readFile(join(dir, RUN_REL, "fix_report.md"), "utf8");
     expect(report).toContain("0 of 0 fixable findings attempted");
     expect(await exists("patch.diff")).toBe(false);
     expect(await exists("fix_verification.json")).toBe(false);
@@ -196,7 +222,7 @@ describe("runFix", () => {
     await runFix(PR_URL, baseOptions({ runFixes: fixes.fn }));
 
     // The five fix artifacts.
-    expect(await readFile(join(dir, ".ai-review", "patch.diff"), "utf8")).toContain("diff --git");
+    expect(await readFile(join(dir, RUN_REL, "patch.diff"), "utf8")).toContain("diff --git");
     expect(await exists("fix_report.md")).toBe(true);
     const results = await readJson("fix_results.json");
     expect(results).toMatchObject({
@@ -306,7 +332,7 @@ describe("runFix", () => {
 
   it("removes a previous run's stale patch.diff so it can never be applied by mistake", async () => {
     await seedReviewRun();
-    await seedFile(".ai-review/patch.diff", "stale patch from an earlier run");
+    await seedFile(`${RUN_REL}/patch.diff`, "stale patch from an earlier run");
     const fixes = fakeRunFixes([
       fixedOutcome({ status: "failed", failure: { kind: "refusal", message: "r" }, edits_applied: 0 }),
     ]);
@@ -365,7 +391,7 @@ describe("runFix", () => {
     await runFix(PR_URL, baseOptions({ verify: true, executeVerification }));
     expect(inputs).toHaveLength(1);
     expect(inputs[0]?.repoDir).toBe(join(dir, ".ai-review", "workspace", "repo"));
-    expect(inputs[0]?.logsDir).toBe(join(dir, ".ai-review", "verification", "fix-logs"));
+    expect(inputs[0]?.logsDir).toBe(join(dir, RUN_REL, "verification", "fix-logs"));
     const verification = await readJson("fix_verification.json");
     expect(verification).toMatchObject({ ran: true, allPassed: true, enabledSource: "flag" });
   });
@@ -380,7 +406,7 @@ describe("runFix", () => {
     expect(await exists("patch.diff")).toBe(false);
     const results = await readJson("fix_results.json");
     expect(results).toMatchObject({ patchWritten: false });
-    const report = await readFile(join(dir, ".ai-review", "fix_report.md"), "utf8");
+    const report = await readFile(join(dir, RUN_REL, "fix_report.md"), "utf8");
     expect(report).toContain("_No patch was produced, so there is nothing to apply._");
   });
 
@@ -404,7 +430,7 @@ describe("runFix", () => {
 
   it("proceeds without the PR-match check when run_metadata.json is missing", async () => {
     await seedReviewRun();
-    await rm(join(dir, ".ai-review", "run_metadata.json"));
+    await rm(join(dir, RUN_REL, "run_metadata.json"));
     await runFix(PR_URL, baseOptions());
     expect(await exists("fix_report.md")).toBe(true);
   });

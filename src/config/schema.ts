@@ -178,17 +178,30 @@ export const ContextConfigSchema = z.object({
  * thresholds tune it, and `llm` scaffolds the PRD's optional "ask an LLM when
  * heuristic confidence is unclear" adjudicator — OFF by default so runs stay
  * deterministic and free of extra model calls.
+ *
+ * The thresholds apply to the composite SAME-ISSUE score (title/claim word
+ * overlap + shared code symbols + span overlap — see deduplicateFindings.ts),
+ * and their defaults were tuned against the TaskFlow demo run's 57 real
+ * findings: every cross-root-cause pair there scored ≤ 0.43 while every group
+ * of rephrasings of one issue connected at ≥ 0.46.
  */
 export const DedupConfigSchema = z
   .object({
     // Same-file findings whose line ranges are within this many lines are merge
     // candidates (0 = require overlap).
     proximityLines: z.number().int().nonnegative().default(10),
-    // Title+claim similarity at/above this auto-merges a candidate pair.
-    mergeThreshold: z.number().min(0).max(1).default(0.6),
-    // Similarity in [candidateThreshold, mergeThreshold) is the "gray zone" the
-    // LLM adjudicator (when enabled) decides; below it, never merge.
-    candidateThreshold: z.number().min(0).max(1).default(0.4),
+    // Same-issue score at/above this triggers a merge of a candidate pair
+    // (subject to the complete-linkage guardrail below).
+    mergeThreshold: z.number().min(0).max(1).default(0.46),
+    // Score in [candidateThreshold, mergeThreshold) is the "gray zone" the
+    // LLM adjudicator (when enabled) decides; below it, never merge a pair.
+    candidateThreshold: z.number().min(0).max(1).default(0.35),
+    // Complete-linkage guardrail (the anti-chaining rule): two clusters may
+    // only merge when EVERY cross pair scores at least this. Prevents transitive
+    // proximity chains from fusing distinct root causes in a dense file, while
+    // still letting a large cluster absorb a tersely-worded duplicate whose
+    // pairwise score with some far member is weak. Must be ≤ candidateThreshold.
+    minLinkScore: z.number().min(0).max(1).default(0.15),
     llm: z
       .object({
         enabled: z.boolean().default(false),
@@ -196,6 +209,26 @@ export const DedupConfigSchema = z
         timeoutMs: z.number().int().positive().default(60_000),
       })
       .default({}),
+  })
+  // Enforce the threshold ordering the clustering logic assumes. In particular
+  // a minLinkScore above mergeThreshold would make `clustersCompatible` refuse
+  // even the pair that triggered the merge — dedup would silently degenerate
+  // into no clustering at all rather than fail loudly here.
+  .superRefine((dedup, ctx) => {
+    if (dedup.minLinkScore > dedup.candidateThreshold) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["minLinkScore"],
+        message: `minLinkScore (${dedup.minLinkScore}) must be ≤ candidateThreshold (${dedup.candidateThreshold}) — it is the complete-linkage floor, below the gray zone`,
+      });
+    }
+    if (dedup.candidateThreshold > dedup.mergeThreshold) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["candidateThreshold"],
+        message: `candidateThreshold (${dedup.candidateThreshold}) must be ≤ mergeThreshold (${dedup.mergeThreshold}) — the gray zone sits below the auto-merge bar`,
+      });
+    }
   })
   .default({});
 
@@ -212,9 +245,12 @@ export const SkepticConfigSchema = z
     backend: ReviewerBackendSchema.default("claude"),
     // Max clusters validated at once (each may spawn a subprocess / model call).
     concurrency: z.number().int().positive().default(4),
-    // Per-cluster timeout in ms. A skeptic that hangs is recorded and the
-    // finding is kept (recall-first), never dropped on an infra hiccup.
-    timeoutMs: z.number().int().positive().default(60_000),
+    // BASE per-cluster timeout in ms; the effective budget scales up with
+    // cluster size (see agents/clusterTimeout.ts), capped at 3× this value.
+    // A skeptic that still hangs is recorded and the finding is kept
+    // (recall-first), never dropped on an infra hiccup. 120s (up from 60s):
+    // demo runs hit 60s and even 90s on ordinary singleton clusters.
+    timeoutMs: z.number().int().positive().default(120_000),
   })
   .default({});
 
@@ -231,9 +267,11 @@ export const JudgeConfigSchema = z
     backend: ReviewerBackendSchema.default("claude"),
     // Max clusters ranked at once (each may spawn a subprocess / model call).
     concurrency: z.number().int().positive().default(4),
-    // Per-cluster timeout in ms. A judge that hangs is recorded and the finding
-    // is classified deterministically and kept (recall-first), never dropped.
-    timeoutMs: z.number().int().positive().default(60_000),
+    // BASE per-cluster timeout in ms; the effective budget scales up with
+    // cluster size (see agents/clusterTimeout.ts), capped at 3× this value.
+    // A judge that still hangs is recorded and the finding is classified
+    // deterministically and kept (recall-first), never dropped.
+    timeoutMs: z.number().int().positive().default(90_000),
   })
   .default({});
 

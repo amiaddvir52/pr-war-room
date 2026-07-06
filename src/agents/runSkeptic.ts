@@ -12,6 +12,7 @@ import type {
 import type { Reporter } from "../ui/reporter.js";
 import { mapWithConcurrency } from "../util/mapWithConcurrency.js";
 import { TIMEOUT_GRACE_MS, withTimeout } from "../util/withTimeout.js";
+import { adaptiveClusterTimeoutMs } from "./clusterTimeout.js";
 import { createSkeptic, type Skeptic } from "./SkepticAgent.js";
 
 /**
@@ -39,8 +40,12 @@ export interface RunSkepticInput {
   packet: ReviewPacket;
   config: Config;
   reporter: Reporter;
-  /** Injected in tests to avoid the network; only called for non-`mock` backends. */
-  makeSkeptic?: (config: Config) => Skeptic;
+  /**
+   * Injected in tests to avoid the network; only called for non-`mock`
+   * backends. `timeoutMs` is the adaptive per-cluster budget (see
+   * clusterTimeout.ts) the returned skeptic's own model call should honour.
+   */
+  makeSkeptic?: (config: Config, timeoutMs?: number) => Skeptic;
 }
 
 export interface RunSkepticResult {
@@ -167,15 +172,18 @@ export const runSkeptic: RunSkeptic = async (input) => {
   // `mock` has no model client (like the reviewer fan-out): validate purely from
   // the deterministic checks instead of asking createModelClient for a mock.
   const useLlm = config.skeptic.backend !== "mock";
+  const makeSkeptic = input.makeSkeptic ?? createSkeptic;
 
-  // Build the skeptic once, up front. A construction failure must NOT abort the
-  // review (recall-first): record it and let every finding fall through to a
-  // keep-on-failure fallback below.
-  let skeptic: Skeptic | null = null;
+  // Probe skeptic construction once, up front, so a misconfigured backend warns
+  // a single time. A construction failure must NOT abort the review
+  // (recall-first): record it and let every finding fall through to a
+  // keep-on-failure fallback below. Per-cluster construction below is cheap
+  // (closures over config — no subprocess, no network) and deterministic, so if
+  // the probe succeeds the per-cluster constructions succeed too.
   let constructionFailure: SkepticFailure | null = null;
   if (useLlm) {
     try {
-      skeptic = (input.makeSkeptic ?? createSkeptic)(config);
+      makeSkeptic(config, config.skeptic.timeoutMs);
     } catch (err) {
       constructionFailure = { kind: "construction_error", message: err instanceof Error ? err.message : String(err) };
       reporter.warn(
@@ -183,6 +191,7 @@ export const runSkeptic: RunSkeptic = async (input) => {
       );
     }
   }
+  const canRunLlm = useLlm && constructionFailure === null;
 
   const spinner = reporter.spinner(
     `validating ${clusters.length} cluster${clusters.length === 1 ? "" : "s"} with the skeptic`,
@@ -193,11 +202,15 @@ export const runSkeptic: RunSkeptic = async (input) => {
       const checks = runEvidenceChecks(cluster, packet, nearbyWindow);
       // No LLM (mock backend), or the skeptic failed to construct: reconcile from
       // the checks and any construction failure — never a network call.
-      if (skeptic === null) return reconcileResult(cluster.cluster_id, checks, null, constructionFailure);
+      if (!canRunLlm) return reconcileResult(cluster.cluster_id, checks, null, constructionFailure);
+      // Adaptive budget: a big merged cluster carries a proportionally bigger
+      // prompt, so it gets a bigger slice than a singleton (clusterTimeout.ts).
+      const timeoutMs = adaptiveClusterTimeoutMs(config.skeptic.timeoutMs, cluster);
       try {
+        const skeptic = makeSkeptic(config, timeoutMs);
         const verdict = await withTimeout(
           skeptic(cluster, packet, checks),
-          config.skeptic.timeoutMs + TIMEOUT_GRACE_MS,
+          timeoutMs + TIMEOUT_GRACE_MS,
         );
         return reconcileResult(cluster.cluster_id, checks, verdict, null);
       } catch (err) {
@@ -211,6 +224,19 @@ export const runSkeptic: RunSkeptic = async (input) => {
     });
   } finally {
     spinner.stop();
+  }
+
+  // Surface every keep-on-failure fallback loudly — the whole point of the
+  // fallback is that the precision gate sat out, and that must never be silent
+  // (demo follow-up: "the report/artifacts must clearly say so").
+  const titleById = new Map(clusters.map((c) => [c.cluster_id, c.merged_title]));
+  for (const r of results) {
+    if (r.failure !== null && r.decision.action !== "drop") {
+      reporter.warn(
+        `skeptic ${r.failure.kind === "timeout" ? "timed out" : `failed (${r.failure.kind})`} on ` +
+          `"${titleById.get(r.cluster_id) ?? r.cluster_id}" — finding kept by recall-first fallback, unvalidated`,
+      );
+    }
   }
   return { results };
 };

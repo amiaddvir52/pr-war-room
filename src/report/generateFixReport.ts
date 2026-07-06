@@ -3,6 +3,7 @@ import type { FinalFinding } from "../findings/schema.js";
 import type { ParsedPr } from "../github/parsePrUrl.js";
 import type { ArtifactPaths } from "../storage/artifactPaths.js";
 import type { CommandExecution, VerificationResults } from "../workspace/schema.js";
+import { dirname, relative } from "node:path";
 import { fence, link, plural, sanitizeInline } from "./markdownHelpers.js";
 
 /**
@@ -209,15 +210,18 @@ function renderHowToApply(input: FixReportInput): string[] {
     out.push("_No patch was produced, so there is nothing to apply._", "");
     return out;
   }
+  // The patch lives in the run-scoped directory; render the path relative to
+  // the `.ai-review` root's parent (the repository/base dir the user runs from).
+  const patchPath = relative(dirname(input.paths.root), input.paths.fix.patch);
   out.push(
     "From your repository root (same repo and branch as the PR head):",
     "",
     "```sh",
-    "git apply --check .ai-review/patch.diff   # preview first",
-    "git apply .ai-review/patch.diff",
+    `git apply --check ${patchPath}   # preview first`,
+    `git apply ${patchPath}`,
     "```",
     "",
-    "If your tree has drifted from the PR head, `git apply --3way .ai-review/patch.diff`",
+    `If your tree has drifted from the PR head, \`git apply --3way ${patchPath}\``,
     "can merge the changes instead.",
     "",
   );

@@ -3,6 +3,7 @@ import { relative } from "node:path";
 import { parsePrUrl } from "../../github/parsePrUrl.js";
 import { loadConfig } from "../../config/loadConfig.js";
 import { getArtifactPaths, type ArtifactPaths } from "../../storage/artifactPaths.js";
+import { readLatestRunPointer } from "../../storage/latestRun.js";
 import { writeJsonArtifact, writeTextArtifact } from "../../storage/writeArtifact.js";
 import { buildRunMetadata } from "../../runMetadata.js";
 import { Reporter } from "../../ui/reporter.js";
@@ -93,7 +94,18 @@ export async function runFix(prUrl: string, options: FixOptions): Promise<void> 
 
   const pr = parsePrUrl(prUrl);
   const { config, source, path } = await loadConfig(cwd);
-  const paths = getArtifactPaths(cwd);
+
+  // Fix operates on the LATEST review run, resolved through `latest.json` —
+  // never by guessing at directories — and writes its own outputs into that
+  // same run directory so a patch always sits next to the findings it came from.
+  const latest = await readLatestRunPointer(cwd);
+  if (latest === null) {
+    throw new FixError(
+      "No review run found (.ai-review/latest.json is missing or unreadable) — " +
+        "run `pr-war-room review <pr-url>` first.",
+    );
+  }
+  const paths = getArtifactPaths(cwd, latest.runId);
 
   const artifactLink = (absolutePath: string): string =>
     reporter.fileLink(relative(cwd, absolutePath), absolutePath);
@@ -108,7 +120,8 @@ export async function runFix(prUrl: string, options: FixOptions): Promise<void> 
     ["PR", `${pr.owner}/${pr.repo}#${pr.number}`],
     ["Config", source === "file" && path ? relative(cwd, path) : "defaults"],
     ["Mode", apply ? "apply (workspace checkout kept patched)" : "patch only"],
-    ["Artifacts", relative(cwd, paths.root)],
+    ["Run", latest.runId],
+    ["Artifacts", relative(cwd, paths.runDir)],
   ]);
   reporter.blank();
   reporter.step("parsed PR URL");
@@ -327,7 +340,7 @@ export async function runFix(prUrl: string, options: FixOptions): Promise<void> 
     reporter.note(
       apply
         ? "Workspace checkout left patched (--apply). Your own working tree was not touched."
-        : "Apply to your tree with: git apply .ai-review/patch.diff",
+        : `Apply to your tree with: git apply ${relative(cwd, paths.fix.patch)}`,
     );
   } else {
     reporter.warn(`no patch produced — see ${artifactLink(paths.fix.report)}`);

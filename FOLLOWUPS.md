@@ -30,7 +30,8 @@ failure under different kinds.
 
 ## 3. Single sort comparator for finding order (reuse)
 
-`buildPool` in `src/report/generateMarkdownReport.ts` re-implements the
+`buildPool` (now in `src/report/reportModel.ts`, shared by the HTML and
+Markdown renderers) re-implements the
 `classification-priority → score desc → id` comparator that
 `selectFinalFindings` in `src/findings/scoreFindings.ts` already uses (only the
 field names differ). Extract one comparator keyed by `{classification, score,
@@ -40,7 +41,7 @@ tiebreak change.
 
 ## 4. Make `narrowClassification`'s invariant explicit (simplification)
 
-`narrowClassification` in `src/report/generateMarkdownReport.ts` has an
+`narrowClassification` in `src/report/reportModel.ts` has an
 unreachable runtime branch (`drop → nice_to_have`): both callers feed it values
 that are provably never `"drop"` (`selectFinalFindings` excludes drops;
 `deterministicClassification` never returns drop). Replace the silent
@@ -88,3 +89,23 @@ schema-re-parse) on that path, or `Object.freeze` the exported default.
 strip unknown keys silently — the same footgun at lower stakes (e.g.
 `{"skeptic": {"concurency": 8}}` is a silent no-op). Sweep them in one pass,
 minding the `.default({})` wrappers, rather than piecemeal.
+
+## 9. Move the per-call timeout into ModelRequest (altitude)
+
+The adaptive per-cluster budget (agents/clusterTimeout.ts) is threaded by
+constructing a fresh skeptic/judge per cluster (`makeSkeptic(config, timeoutMs)`)
+— construction is closure-only today, but timeout is really a per-REQUEST
+concern. For the `claude-api` backend the client-level override is a silent
+no-op (createAnthropicModelClient takes no timeout; only the orchestrator's
+`withTimeout` wrapper enforces the budget there). A `timeoutMs` on
+`ModelRequest`/`complete()` with one reused client would put the knob at the
+right layer, make all backends behave identically, and delete the
+construction-probe pattern duplicated across runSkeptic/runJudge.
+
+## 10. Dedup's dense score matrix is O(n²) memory (efficiency, low priority)
+
+`clusterFindings` backs the complete-linkage check with a dense
+`Float64Array(n*n)`; candidate pairs are same-file-only so it is mostly zeros.
+Irrelevant at realistic scale (200 findings ≈ 320 KB) but a sparse
+`Map<i*n+j, score>` with a `?? 0` default would drop memory to
+O(candidate pairs) if finding counts ever grow by orders of magnitude.

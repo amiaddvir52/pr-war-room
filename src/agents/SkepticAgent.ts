@@ -88,10 +88,14 @@ export function skepticFromClient(client: ModelClient): Skeptic {
  * misconfigured backend fails loudly here, not mid-validation. Callers only
  * reach this for a non-`mock` backend — `runSkeptic` handles `mock` with a
  * deterministic, checks-only verdict instead of a model call.
+ *
+ * `timeoutMs` overrides the config's per-cluster timeout: `runSkeptic` builds
+ * one skeptic per cluster with an adaptive, size-scaled budget (see
+ * clusterTimeout.ts), so a big merged cluster gets more time than a singleton.
  */
-export function createSkeptic(config: Config): Skeptic {
+export function createSkeptic(config: Config, timeoutMs?: number): Skeptic {
   const client: ModelClient = createModelClient(config.skeptic.backend, {
-    timeoutMs: config.skeptic.timeoutMs,
+    timeoutMs: timeoutMs ?? config.skeptic.timeoutMs,
   });
   return skepticFromClient(client);
 }

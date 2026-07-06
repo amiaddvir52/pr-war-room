@@ -48,9 +48,16 @@ export type {
 
 export {
   getArtifactPaths,
+  getSharedPaths,
   ARTIFACT_ROOT_DIRNAME,
 } from "./storage/artifactPaths.js";
-export type { ArtifactPaths } from "./storage/artifactPaths.js";
+export type { ArtifactPaths, SharedArtifactPaths } from "./storage/artifactPaths.js";
+export {
+  newRunId,
+  readLatestRunPointer,
+  writeLatestRunPointer,
+} from "./storage/latestRun.js";
+export type { LatestRunPointer } from "./storage/latestRun.js";
 export { writeTextArtifact, writeJsonArtifact } from "./storage/writeArtifact.js";
 
 export { buildRunMetadata } from "./runMetadata.js";
@@ -164,9 +171,15 @@ export {
   clusterFindings,
   mergeCluster,
   findingSimilarity,
-  textSimilarity,
+  extractSymbols,
+  SAME_ISSUE_WEIGHTS,
 } from "./findings/deduplicateFindings.js";
-export type { Adjudicator } from "./findings/deduplicateFindings.js";
+export type {
+  Adjudicator,
+  ClusteringResult,
+  DedupResult,
+  DedupStats,
+} from "./findings/deduplicateFindings.js";
 export { createDedupAdjudicator } from "./agents/DedupAdjudicator.js";
 
 export {

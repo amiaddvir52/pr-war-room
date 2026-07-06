@@ -32,9 +32,15 @@ A `review` run executes this pipeline, writing each stage's artifacts under
 4. **Reviewer fan-out** (Phases 5–6) — run several independent review agents
    in parallel against the packet, each a **backend × angle** persona;
    validate each agent's output and merge it into one normalized findings set.
-5. **Dedup** (Phase 7) — cluster overlapping findings from different agents
-   into one issue each (singletons included), so later stages see each
-   underlying issue once.
+5. **Dedup** (Phase 7) — cluster findings from different agents into one issue
+   each (singletons included), so later stages see each underlying issue once.
+   Clustering is **issue-identity based** (title/claim word overlap, shared
+   code symbols, span overlap) with a complete-linkage guardrail, so distinct
+   root causes on adjacent lines of a dense file never chain into one giant
+   cluster, while the same issue phrased differently — including across
+   vendors — merges. Gray-zone pairs can optionally go to an LLM adjudicator
+   (`dedup.llm.enabled`); the CLI always says whether LLM dedup ran or was
+   skipped.
 6. **Skeptic** (Phase 8) — challenge every cluster with deterministic
    file/line/diff checks and (unless disabled) an LLM skeptic that tries to
    disprove it; unsupported findings are dropped, recall-first.
@@ -43,12 +49,19 @@ A `review` run executes this pipeline, writing each stage's artifacts under
    deterministic priority score, producing `judge/ranked_findings.json` (the
    full record, drops included with reasons) and `final_findings.json` (the
    report-ready subset).
-8. **Report** (Phase 10) — render `report.md`: findings grouped
-   must-fix / should-fix / optional with their evidence and suggested fixes, a
-   readiness verdict, the review funnel (raw → clustered → skeptic → ranked,
-   with the dropped count), verification results, and links to the raw
-   artifacts. Honours `review.maxFindings` / `review.includeNiceToHave` and
-   degrades cleanly when the skeptic or judge is disabled.
+8. **Report** (Phase 10) — render the primary **`report.html`**: a
+   self-contained, offline HTML report (no CDN or external assets) with the
+   readiness verdict, the review funnel (raw → clustered → skeptic → ranked),
+   severity tiles, client-side filters/search (severity, category, file,
+   skeptic support, text), one card per finding (badges, claim, suggested
+   fix/test, skeptic & judge verdicts, collapsible evidence, source agents),
+   the verification results, and the dropped findings with reasons. All
+   model/subprocess-derived content is HTML-escaped. A secondary `report.md`
+   renders the same model for terminals/PR comments; it honours
+   `review.maxFindings` / `review.includeNiceToHave` and both degrade cleanly
+   when the skeptic or judge is disabled. Skeptic/judge timeouts are called
+   out in both reports — a finding kept by the recall-first fallback is
+   labelled as unvalidated, never presented as validated.
 
 On top of that sits **fix mode** (Phase 11, `pr-war-room fix <pr-url>`): it
 selects the review's fixable findings, has a fix agent propose exact
@@ -153,44 +166,53 @@ pr-war-room fix https://github.com/org/repo/pull/123 --apply --verify
 Global flags: `-q`/`--quiet` suppresses non-error output; `--no-color` disables
 colored output.
 
-Every `review` run writes artifacts under `.ai-review/` in the current directory:
+Every `review` run writes its artifacts into **its own run directory** under
+`.ai-review/runs/<run_id>/`, so a new run can never mix its outputs with an
+older run's; `.ai-review/latest.json` always points at the most recent run
+(fix mode resolves the run through it). Only the clone cache is shared across
+runs:
 
 ```text
 .ai-review/
-├── run_metadata.json               # the review run's record
-├── github/
-│   ├── pr_metadata.json            # ingested PR metadata
-│   ├── changed_files.json
-│   └── diff.patch
+├── latest.json                     # pointer to the most recent review run
 ├── workspace/
-│   ├── repo/                       # shallow checkout of the PR head
-│   └── workspace_metadata.json     # detected project type / package manager / commands
-├── verification/
-│   ├── initial_verification.json   # command results (commands execute only with --verify)
-│   └── logs/
-├── context/
-│   ├── review_packet.json          # the structured review packet
-│   └── review_packet.md
-├── raw/
-│   ├── <agent>_review.md           # verbatim model output, per agent
-│   ├── <agent>_findings.json       # that agent's validated findings, per agent
-│   └── agent_runs.json             # which agents ran, failed, timed out, or were skipped
-├── normalized/
-│   └── all_findings.json           # every agent's findings, merged and normalized
-├── deduped/
-│   └── finding_clusters.json       # one cluster per underlying issue
-├── skeptic/
-│   └── skeptic_results.json        # each cluster's evidence-validation verdict
-├── judge/
-│   └── ranked_findings.json        # every cluster's classification + score, drops included
-├── final_findings.json             # report-ready non-dropped subset, most-important-first
-└── report.md                       # the concise, human-facing Markdown report
+│   └── repo/                       # shallow checkout of the PR head (shared clone cache)
+└── runs/<run_id>/
+    ├── run_metadata.json           # the review run's record
+    ├── github/
+    │   ├── pr_metadata.json        # ingested PR metadata
+    │   ├── changed_files.json
+    │   └── diff.patch
+    ├── workspace_metadata.json     # what this run checked out / detected
+    ├── verification/
+    │   ├── initial_verification.json  # command results (commands execute only with --verify)
+    │   └── logs/
+    ├── context/
+    │   ├── review_packet.json      # the structured review packet
+    │   └── review_packet.md
+    ├── raw/
+    │   ├── <agent>_review.md       # verbatim model output, per agent
+    │   ├── <agent>_findings.json   # that agent's validated findings, per agent
+    │   └── agent_runs.json         # which agents ran, failed, timed out, or were skipped
+    ├── normalized/
+    │   └── all_findings.json       # every agent's findings, merged and normalized
+    ├── deduped/
+    │   ├── finding_clusters.json   # one cluster per underlying issue
+    │   └── dedup_stats.json        # how dedup decided (gray pairs, LLM ran/skipped, thresholds)
+    ├── skeptic/
+    │   └── skeptic_results.json    # each cluster's evidence-validation verdict
+    ├── judge/
+    │   └── ranked_findings.json    # every cluster's classification + score, drops included
+    ├── final_findings.json         # report-ready non-dropped subset, most-important-first
+    ├── report.html                 # the primary, self-contained HTML report
+    └── report.md                   # secondary Markdown rendering of the same report
 ```
 
-A `fix` run adds (never overwriting the review's `run_metadata.json`):
+A `fix` run adds, inside the same run directory it fixes (never overwriting the
+review's `run_metadata.json`):
 
 ```text
-.ai-review/
+.ai-review/runs/<run_id>/
 ├── patch.diff                      # unified diff of all applied fixes
 ├── fix_report.md                   # what was fixed, what wasn't and why
 ├── fix_results.json                # machine-readable per-finding outcomes
@@ -205,8 +227,9 @@ scripts executes its code locally. Add `.ai-review/` to your ignore rules.
 
 ### Fix mode
 
-`pr-war-room fix <pr-url>` reads the latest review run's `final_findings.json`
-(so run `review` first, with the judge enabled) and attempts the findings that
+`pr-war-room fix <pr-url>` resolves the latest review run via
+`.ai-review/latest.json` and reads its `final_findings.json`
+(so run `review` first, with the judge enabled), then attempts the findings that
 need a code change and were ranked `blocker` or `should_fix_before_review` —
 highest priority first, capped by `fix.maxFindings`. Instead of asking the model
 for a diff (LLM-emitted diffs are brittle), the fix agent returns **exact
@@ -219,7 +242,8 @@ restricted to files the PR changed.
 
 By default the workspace is reverted after the patch is written (**patch-only**);
 `--apply` leaves the workspace checkout patched instead. Either way, take the
-changes into your own tree with `git apply .ai-review/patch.diff` — the tool
+changes into your own tree with `git apply .ai-review/runs/<run_id>/patch.diff`
+(the CLI prints the exact path) — the tool
 **never touches your working tree, never commits, never pushes, and never
 publishes comments**. `--verify` (or `verification.enabled: true`) re-runs the
 detected/configured verification commands against the patched checkout and

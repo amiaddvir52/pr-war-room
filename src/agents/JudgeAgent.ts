@@ -77,10 +77,13 @@ export function judgeFromClient(client: ModelClient): Judge {
  * backend fails loudly here, not mid-ranking. Callers only reach this for a
  * non-`mock` backend — `runJudge` handles `mock` with a deterministic
  * classification instead of a model call.
+ *
+ * `timeoutMs` overrides the config's per-cluster timeout: `runJudge` builds one
+ * judge per cluster with an adaptive, size-scaled budget (see clusterTimeout.ts).
  */
-export function createJudge(config: Config): Judge {
+export function createJudge(config: Config, timeoutMs?: number): Judge {
   const client: ModelClient = createModelClient(config.judge.backend, {
-    timeoutMs: config.judge.timeoutMs,
+    timeoutMs: timeoutMs ?? config.judge.timeoutMs,
   });
   return judgeFromClient(client);
 }

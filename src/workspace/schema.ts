@@ -8,7 +8,7 @@ import type { PackageManager, ProjectType } from "../context/types.js";
  * stable shapes the Phase-4 review packet reads.
  */
 
-/** `.ai-review/workspace/workspace_metadata.json` */
+/** `.ai-review/runs/<run_id>/workspace_metadata.json` (run-scoped; the checkout itself is shared) */
 export interface WorkspaceMetadata {
   schemaVersion: 1;
   /** Repo checkout location, relative to the run's base dir. */

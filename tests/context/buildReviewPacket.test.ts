@@ -119,7 +119,7 @@ describe("buildReviewPacket", () => {
   beforeEach(async () => {
     cwd = await mkdtemp(join(tmpdir(), "prwr-packet-"));
     // Place the changed file in the checkout so nearby context can be read.
-    const repoDir = getArtifactPaths(cwd).workspace.repo;
+    const repoDir = getArtifactPaths(cwd, "test-run").workspace.repo;
     await mkdir(join(repoDir, "src"), { recursive: true });
     await writeFile(
       join(repoDir, "src", "f.ts"),
@@ -133,7 +133,7 @@ describe("buildReviewPacket", () => {
   });
 
   async function readJson(...segments: string[]): Promise<Record<string, unknown>> {
-    const raw = await readFile(join(cwd, ".ai-review", ...segments), "utf8");
+    const raw = await readFile(join(cwd, ".ai-review", "runs", "test-run", ...segments), "utf8");
     return JSON.parse(raw) as Record<string, unknown>;
   }
 
@@ -144,7 +144,7 @@ describe("buildReviewPacket", () => {
       changedFiles: changedFiles("@@ -2,1 +2,1 @@"),
       workspace: workspace(),
       config: defaultConfig,
-      paths: getArtifactPaths(cwd),
+      paths: getArtifactPaths(cwd, "test-run"),
       cwd,
     });
 
@@ -163,7 +163,7 @@ describe("buildReviewPacket", () => {
 
     const json = await readJson("context", "review_packet.json");
     expect(json["schemaVersion"]).toBe(1);
-    const md = await readFile(join(cwd, ".ai-review", "context", "review_packet.md"), "utf8");
+    const md = await readFile(join(cwd, ".ai-review", "runs", "test-run", "context", "review_packet.md"), "utf8");
     expect(md).toContain("# Review Packet: org/repo#123");
     expect(md).toContain("npm run test");
     expect(md).toContain("Diff:");
@@ -178,7 +178,7 @@ describe("buildReviewPacket", () => {
       changedFiles: changedFiles(bigPatch),
       workspace: workspace(),
       config,
-      paths: getArtifactPaths(cwd),
+      paths: getArtifactPaths(cwd, "test-run"),
       cwd,
     });
 
@@ -200,7 +200,7 @@ describe("buildReviewPacket", () => {
       changedFiles: changedFiles("@@ -2,1 +2,1 @@"),
       workspace: ws,
       config: defaultConfig,
-      paths: getArtifactPaths(cwd),
+      paths: getArtifactPaths(cwd, "test-run"),
       cwd,
     });
 
@@ -233,7 +233,7 @@ describe("buildReviewPacket", () => {
       changedFiles: renamed,
       workspace: workspace(),
       config: defaultConfig,
-      paths: getArtifactPaths(cwd),
+      paths: getArtifactPaths(cwd, "test-run"),
       cwd,
     });
 
@@ -248,7 +248,7 @@ describe("buildReviewPacket", () => {
       changedFiles: changedFiles("@@ -2,1 +2,1 @@"),
       workspace: workspace(),
       config: defaultConfig,
-      paths: getArtifactPaths(cwd),
+      paths: getArtifactPaths(cwd, "test-run"),
       cwd,
       collectContext: async () => {
         throw new Error("boom");

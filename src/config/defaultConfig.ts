@@ -39,12 +39,15 @@ export const defaultConfig: Config = {
     nearbyContextLines: 20,
     maxNearbyLinesPerFile: 400,
   },
-  // Phase 7 — deduplication. Heuristic clustering is always on; the LLM
-  // adjudicator is off by default so runs stay deterministic and call-free.
+  // Phase 7 — deduplication. Heuristic same-issue clustering is always on; the
+  // LLM adjudicator is off by default so runs stay deterministic and call-free.
+  // Threshold rationale lives on DedupConfigSchema (tuned against the TaskFlow
+  // demo run's 57 real findings).
   dedup: {
     proximityLines: 10,
-    mergeThreshold: 0.6,
-    candidateThreshold: 0.4,
+    mergeThreshold: 0.46,
+    candidateThreshold: 0.35,
+    minLinkScore: 0.15,
     llm: {
       enabled: false,
       backend: "claude",
@@ -53,20 +56,22 @@ export const defaultConfig: Config = {
   },
   // Phase 8 — skeptic / evidence validation. ON by default (the precision gate);
   // deterministic checks always run, the LLM skeptic runs on `claude` unless the
-  // backend is `mock`.
+  // backend is `mock`. timeoutMs is the BASE per-cluster budget; big clusters
+  // scale up to 3× (agents/clusterTimeout.ts).
   skeptic: {
     enabled: true,
     backend: "claude",
     concurrency: 4,
-    timeoutMs: 60_000,
+    timeoutMs: 120_000,
   },
   // Phase 9 — LLM-as-a-judge ranking. ON by default (produces the report input),
   // on `claude` unless the backend is `mock` (which ranks deterministically).
+  // timeoutMs scales with cluster size like the skeptic's.
   judge: {
     enabled: true,
     backend: "claude",
     concurrency: 4,
-    timeoutMs: 60_000,
+    timeoutMs: 90_000,
   },
   // Phase 11 — fix mode. One model call per selected finding; the cap takes
   // the highest-priority findings first. No `enabled` key — running `fix` is

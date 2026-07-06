@@ -13,7 +13,7 @@ import type {
   SkepticVerdict,
 } from "../../src/findings/schema.js";
 import type { PacketChangedFile } from "../../src/context/types.js";
-import { silentReporter } from "../../src/ui/reporter.js";
+import { Reporter, silentReporter } from "../../src/ui/reporter.js";
 import { makeReviewPacket } from "../fixtures/reviewPacket.js";
 
 const PASS: EvidenceChecks = {
@@ -312,5 +312,56 @@ describe("runSkeptic", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("warns visibly when a timeout fallback keeps a finding unvalidated", async () => {
+    vi.useFakeTimers();
+    try {
+      const lines: string[] = [];
+      const capturing = new Reporter({ color: false, out: (line) => lines.push(line), err: () => {} });
+      const hang: Skeptic = () => new Promise<SkepticVerdict>(() => {});
+      const packet = makeReviewPacket({ changedFiles: [changedFile()] });
+      const promise = runSkeptic({
+        clusters: [cluster({ merged_title: "big merged cluster" })],
+        packet,
+        config: withConfig({ backend: "claude", timeoutMs: 1_000 }),
+        reporter: capturing,
+        makeSkeptic: () => hang,
+      });
+      await vi.advanceTimersByTimeAsync(1_000 + 250 + 5);
+      await promise;
+      expect(
+        lines.some(
+          (l) => l.includes("timed out") && l.includes("big merged cluster") && l.includes("recall-first fallback"),
+        ),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("scales the per-cluster timeout with cluster size (adaptive budget)", async () => {
+    const budgets: Array<number | undefined> = [];
+    const skeptic: Skeptic = async () => verdict({ recommended_action: "keep" });
+    const packet = makeReviewPacket({ changedFiles: [changedFile()] });
+    const big = cluster({
+      cluster_id: "cluster-002",
+      source_finding_ids: Array.from({ length: 11 }, (_, i) => `f-${i}`),
+    });
+    await runSkeptic({
+      clusters: [cluster(), big],
+      packet,
+      config: withConfig({ backend: "claude", timeoutMs: 10_000, concurrency: 1 }),
+      reporter,
+      makeSkeptic: (_config, timeoutMs) => {
+        budgets.push(timeoutMs);
+        return skeptic;
+      },
+    });
+    // First call is the construction probe (base timeout), then one per cluster
+    // in order: the singleton gets the base, the 11-member cluster 3× (capped).
+    expect(budgets[0]).toBe(10_000);
+    expect(budgets).toContain(10_000);
+    expect(budgets).toContain(30_000);
   });
 });
